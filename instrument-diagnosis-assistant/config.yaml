@@ -1,0 +1,15 @@
+# Minimal configuration for Instrument Diagnosis Assistant
+
+models:
+  text_model: "us.amazon.nova-pro-v1:0"
+  multimodal_model: "us.amazon.nova-canvas-v1:0"
+  embedding_model: "amazon.titan-embed-text-v2:0"
+  temperature: 0.3
+  top_p: 0.9
+  max_tokens: 4096
+
+deployment:
+  aws_region: "us-east-1"
+  streamlit:
+    port: 8501
+    host: "localhost"

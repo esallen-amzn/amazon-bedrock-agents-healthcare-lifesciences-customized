@@ -1,0 +1,109 @@
+# Test Environment Configuration
+# Copy this file to config.yaml and customize for your test environment
+
+models:
+  # Amazon Nova models for testing
+  text_model: "us.amazon.nova-pro-v1:0"
+  multimodal_model: "us.amazon.nova-canvas-v1:0"
+  embedding_model: "amazon.titan-embed-text-v2:0"
+  
+  # Test-optimized parameters
+  parameters:
+    max_tokens: 4096
+    temperature: 0.3
+    top_p: 0.9
+    top_k: 50
+
+knowledge_base:
+  # Test KB configuration
+  kb_id: ""  # Will be populated during test deployment
+  retrieval_config:
+    max_results: 8
+    score_threshold: 0.65  # Moderate threshold for testing
+    
+log_analysis:
+  # Test settings for validation
+  chunk_size_mb: 30
+  failure_threshold: 0.75
+  confidence_threshold: 0.7
+  max_file_size_mb: 200
+  
+  # Test-specific settings
+  use_sample_data: true  # Use provided sample data
+  validate_against_expected: true  # Compare against expected results
+
+component_recognition:
+  entity_confidence: 0.6
+  naming_variations: true
+  max_components_per_doc: 200
+  
+  # Test validation
+  validate_component_extraction: true
+  test_naming_variations: true
+
+multimodal_processing:
+  # Test settings for Nova Canvas
+  image_analysis_enabled: true
+  max_image_size_mb: 15
+  supported_formats: ["pdf", "png", "jpg", "jpeg"]
+  
+  # Test validation
+  validate_image_extraction: true
+  test_ocr_accuracy: true
+
+deployment:
+  aws_region: "us-east-1"
+  environment: "test"
+  auth_mode: "oauth"
+  
+  # Test resource settings
+  memory_enabled: true
+  session_timeout_minutes: 30
+  
+  # Streamlit configuration
+  streamlit:
+    port: 8504  # Test port
+    host: "localhost"
+    
+  # Test-specific configurations
+  auto_cleanup: true  # Clean up test resources
+  test_data_retention_days: 7
+
+# Test scenarios and validation
+testing:
+  # Automated test scenarios
+  scenarios:
+    - name: "log_analysis_pass"
+      description: "Test with logs that should pass diagnosis"
+      expected_result: "PASS"
+      confidence_min: 0.8
+      
+    - name: "log_analysis_fail"
+      description: "Test with logs that should fail diagnosis"
+      expected_result: "FAIL"
+      confidence_min: 0.8
+      
+    - name: "component_recognition"
+      description: "Test component extraction from engineering docs"
+      expected_components_min: 10
+      
+    - name: "multimodal_processing"
+      description: "Test processing of troubleshooting guides with images"
+      expected_procedures_min: 5
+      
+    - name: "cross_source_correlation"
+      description: "Test correlation across multiple data sources"
+      expected_correlations_min: 3
+
+  # Performance benchmarks
+  performance:
+    max_response_time_seconds: 30
+    max_memory_usage_mb: 1024
+    max_file_processing_time_seconds: 60
+    
+  # Validation settings
+  validation:
+    strict_mode: true
+    fail_on_low_confidence: true
+    require_all_components: false
+    validate_image_analysis: true

@@ -1,0 +1,36 @@
+version: 1.0.0
+description: A healthcare AI agent for medical research
+agent:
+  name: healthcare-agent
+  model_id: us.anthropic.claude-3-7-sonnet-20250219-v1:0
+  system_prompt: ''
+  tools: []
+  gateway_url: ''
+  memory_enabled: true
+  auth_mode: oauth
+  max_tokens: 4096
+  temperature: 0.7
+  top_p: 0.9
+deployment:
+  project_name: healthcare-agent
+  aws_region: us-east-1
+  prefix: healthcare-agent
+  oauth_enabled: true
+  gateway_name: healthcare-agent-gateway
+  memory_name: healthcare-agent-memory
+  cognito_provider_name: healthcare-agent-auth
+  tags: {}
+tools:
+- name: medical_search
+  description: Search medical literature and databases
+  function_name: search_medical_literature
+  parameters:
+    query:
+      type: string
+      description: Search query
+    database:
+      type: string
+      description: Database to search
+  required_permissions: []
+  enabled: true
+  category: medical

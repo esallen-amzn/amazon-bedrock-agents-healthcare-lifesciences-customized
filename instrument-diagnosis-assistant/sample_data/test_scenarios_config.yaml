@@ -1,0 +1,168 @@
+# Test Scenarios Configuration
+# This file defines test scenarios for validating the Instrument Diagnosis Assistant
+
+test_scenarios:
+  
+  # Scenario 1: Normal Operation Validation
+  normal_operation:
+    description: "Validate system can recognize normal, healthy operation"
+    gold_standard_logs:
+      - "gold_standard_logs/system_log_good_001.txt"
+      - "gold_standard_logs/pc_log_good_001.txt"
+    test_logs:
+      - "gold_standard_logs/system_log_good_001.txt"
+      - "gold_standard_logs/pc_log_good_001.txt"
+    expected_result:
+      status: "PASS"
+      confidence_threshold: 0.9
+      failure_indicators: []
+    components_to_identify:
+      - "Optical Module"
+      - "Detection Array" 
+      - "Temperature Control System"
+      - "Fluid System"
+      - "Instrument Control Software"
+    
+  # Scenario 2: Multiple System Failures
+  multiple_failures:
+    description: "Test detection of multiple simultaneous system failures"
+    gold_standard_logs:
+      - "gold_standard_logs/system_log_good_001.txt"
+      - "gold_standard_logs/pc_log_good_001.txt"
+    test_logs:
+      - "failed_unit_logs/system_log_fail_001.txt"
+      - "failed_unit_logs/pc_log_fail_001.txt"
+    expected_result:
+      status: "FAIL"
+      confidence_threshold: 0.8
+      failure_indicators:
+        - "Laser power below threshold"
+        - "Temperature instability"
+        - "Fluid system pressure low"
+        - "USB connection timeout"
+        - "Memory usage high"
+    components_to_identify:
+      - "Optical Module (OM-450)"
+      - "Temperature Control System (TCS-PRO)"
+      - "Fluid System (FS-MICRO)"
+      - "USB Interface"
+    troubleshooting_guides:
+      - "troubleshooting_guides/optical_system_troubleshooting.md"
+      - "troubleshooting_guides/software_communication_guide.md"
+
+  # Scenario 3: Component Recognition Test
+  component_recognition:
+    description: "Test ability to identify and map system components"
+    engineering_docs:
+      - "engineering_docs/component_specifications.md"
+      - "engineering_docs/system_architecture.md"
+    expected_components:
+      hardware:
+        - name: "Optical Module"
+          model: "OM-450"
+          function: "Primary light source and optical path management"
+          aliases: ["Laser Module", "Light Source"]
+        - name: "Detection Array"
+          model: "DA-16CH"
+          function: "Multi-channel signal detection and conversion"
+          aliases: ["Detector", "Photodiode Array"]
+        - name: "Temperature Control System"
+          model: "TCS-PRO"
+          function: "Maintains stable operating temperature"
+          aliases: ["TCS", "Thermal Control"]
+        - name: "Fluid System"
+          model: "FS-MICRO"
+          function: "Sample handling and fluid management"
+          aliases: ["Fluidics", "Sample Handler"]
+      software:
+        - name: "Instrument Control Software"
+          version: "v2.4.1"
+          function: "Main control and coordination software"
+          modules: ["HIM", "DAM", "SPM", "UIM"]
+        - name: "Signal Processing Unit"
+          version: "SPU-ADVANCED"
+          function: "Real-time signal analysis and processing"
+          algorithms: ["Noise reduction", "Peak detection", "Baseline correction"]
+
+  # Scenario 4: Multi-modal Document Processing
+  multimodal_processing:
+    description: "Test processing of troubleshooting guides with text and visual elements"
+    troubleshooting_docs:
+      - "troubleshooting_guides/optical_system_troubleshooting.md"
+      - "troubleshooting_guides/software_communication_guide.md"
+    expected_guidance:
+      optical_issues:
+        - "Check Power Supply"
+        - "Inspect Laser Module"
+        - "Clean Optical Path"
+        - "Calibrate Laser Power"
+      communication_issues:
+        - "Check Physical Connections"
+        - "Driver Issues"
+        - "Port Configuration"
+        - "Alternative Connection Methods"
+    visual_elements:
+      - "Optical Module Layout diagram"
+      - "Access Panel Locations"
+      - "System Block Diagram"
+
+  # Scenario 5: Cross-source Correlation
+  cross_source_correlation:
+    description: "Test correlation of information across logs, docs, and guides"
+    input_sources:
+      logs:
+        - "failed_unit_logs/system_log_fail_001.txt"
+        - "failed_unit_logs/pc_log_fail_001.txt"
+      documentation:
+        - "engineering_docs/component_specifications.md"
+      troubleshooting:
+        - "troubleshooting_guides/optical_system_troubleshooting.md"
+        - "troubleshooting_guides/software_communication_guide.md"
+    expected_correlations:
+      - log_indicator: "Laser power: 78% (Below threshold)"
+        component: "Optical Module (OM-450)"
+        troubleshooting_section: "Laser Power Issues"
+        recommended_actions: ["Check Power Supply", "Inspect Laser Module"]
+      - log_indicator: "USB Connection: TIMEOUT"
+        component: "USB Interface"
+        troubleshooting_section: "USB Connection Problems"
+        recommended_actions: ["Check Physical Connections", "Driver Issues"]
+      - log_indicator: "Temperature Control: UNSTABLE"
+        component: "Temperature Control System (TCS-PRO)"
+        troubleshooting_section: "Temperature Control Issues"
+        recommended_actions: ["Check Cooling System", "Inspect Temperature Sensors"]
+
+# Performance Test Parameters
+performance_tests:
+  large_file_processing:
+    description: "Test processing of large log files (>250MB)"
+    simulated_file_size: "250MB"
+    max_processing_time: "300s"  # 5 minutes
+    memory_limit: "2GB"
+    
+  concurrent_analysis:
+    description: "Test multiple simultaneous diagnostic requests"
+    concurrent_requests: 5
+    max_response_time: "60s"
+    
+  knowledge_base_retrieval:
+    description: "Test Knowledge Base query performance"
+    max_query_time: "10s"
+    min_relevance_score: 0.7
+
+# Configuration for Nova Models
+model_configuration:
+  text_analysis:
+    model: "us.amazon.nova-pro-v1:0"
+    max_tokens: 4000
+    temperature: 0.1
+    
+  multimodal_analysis:
+    model: "us.amazon.nova-canvas-v1:0"
+    max_tokens: 4000
+    temperature: 0.1
+    
+  knowledge_base:
+    retrieval_config:
+      max_results: 10
+      score_threshold: 0.7

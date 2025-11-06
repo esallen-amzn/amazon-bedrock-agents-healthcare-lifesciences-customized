@@ -1,0 +1,70 @@
+version: 1.0.0
+description: 'Instrument Diagnosis Assistant - AI-powered system for analyzing instrument logs and providing troubleshooting guidance using Amazon Nova models'
+agent:
+  name: instrument-diagnosis-assistant
+  model_id: us.amazon.nova-pro-v1:0  # Primary text model for analysis and reasoning
+  system_prompt: |
+    You are an Instrument Diagnosis Assistant, an AI expert specialized in analyzing instrument logs, 
+    recognizing system components, and providing troubleshooting guidance. You help technicians 
+    diagnose instrument failures by:
+    
+    1. **Log Analysis**: Compare failed unit logs against gold standard patterns to identify failures
+    2. **Component Recognition**: Identify hardware/software components from engineering documentation  
+    3. **Multi-modal Processing**: Analyze troubleshooting guides with text, images, and diagrams using Nova Canvas
+    4. **Cross-source Correlation**: Correlate information across logs, documentation, and guides
+    5. **Diagnosis Generation**: Provide clear pass/fail determinations with confidence levels
+    
+    **Available Models:**
+    - Amazon Nova Pro (us.amazon.nova-pro-v1:0): Primary text analysis and reasoning
+    - Amazon Nova Canvas (us.amazon.nova-canvas-v1:0): Multi-modal document processing
+    
+    **Key Capabilities:**
+    - Process log files larger than 250MB efficiently using chunked analysis
+    - Handle various component naming conventions and relationships
+    - Extract guidance from visual troubleshooting materials
+    - Provide structured diagnosis results with confidence scoring
+    
+    Always provide clear, actionable guidance with confidence levels and specific recommendations.
+    Configuration parameters are managed via config.yaml for model selection and system settings.
+  tools: []
+  gateway_url: ''
+  memory_enabled: true
+  auth_mode: oauth
+  max_tokens: 8192  # Configurable via config.yaml
+  temperature: 0.3  # Configurable via config.yaml - low for consistent diagnosis
+  top_p: 0.9       # Configurable via config.yaml
+deployment:
+  project_name: instrument-diagnosis-assistant
+  aws_region: us-east-1
+  prefix: instrument-diagnosis-assistant
+  oauth_enabled: true
+  gateway_name: instrument-diagnosis-assistant-gateway
+  memory_name: instrument-diagnosis-assistant-memory
+  cognito_provider_name: instrument-diagnosis-assistant-auth
+  # Knowledge Base configuration (to be created during deployment)
+  knowledge_base:
+    enabled: true
+    name: instrument-diagnosis-kb
+    description: "Knowledge base for troubleshooting guides and engineering documentation"
+    data_sources:
+      - name: troubleshooting-guides
+        description: "Multi-modal troubleshooting guides with images and procedures"
+        s3_bucket: "${prefix}-troubleshooting-guides"
+      - name: engineering-docs
+        description: "Component specifications and system architecture documentation"
+        s3_bucket: "${prefix}-engineering-docs"
+    embedding_model: amazon.titan-embed-text-v2:0
+    chunking_strategy:
+      type: FIXED_SIZE
+      max_tokens: 512
+      overlap_percentage: 20
+  # Model configurations for different use cases
+  models:
+    text_analysis: us.amazon.nova-pro-v1:0
+    multimodal_processing: us.amazon.nova-canvas-v1:0
+    embedding: amazon.titan-embed-text-v2:0
+  tags:
+    Project: instrument-diagnosis-assistant
+    Environment: production
+    Purpose: instrument-analysis
+tools: []

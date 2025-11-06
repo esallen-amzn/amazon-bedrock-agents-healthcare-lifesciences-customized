@@ -1,0 +1,66 @@
+# Development Environment Configuration
+# Copy this file to config.yaml and customize for your development environment
+
+models:
+  # Amazon Nova models for development
+  text_model: "us.amazon.nova-pro-v1:0"
+  multimodal_model: "us.amazon.nova-canvas-v1:0"
+  embedding_model: "amazon.titan-embed-text-v2:0"
+  
+  # Model parameters for development (more verbose for debugging)
+  parameters:
+    max_tokens: 4096
+    temperature: 0.3
+    top_p: 0.9
+    top_k: 50
+
+knowledge_base:
+  # Development KB (will be created during deployment)
+  kb_id: ""  # Leave empty - will be populated after KB creation
+  retrieval_config:
+    max_results: 10
+    score_threshold: 0.6  # Lower threshold for development
+    
+log_analysis:
+  # Development settings for faster processing
+  chunk_size_mb: 25  # Smaller chunks for dev
+  failure_threshold: 0.7  # Lower threshold for testing
+  confidence_threshold: 0.65  # Lower confidence for development
+  max_file_size_mb: 100  # Limit for development
+
+component_recognition:
+  entity_confidence: 0.5  # Lower confidence for development
+  naming_variations: true
+  max_components_per_doc: 100
+
+multimodal_processing:
+  # Development settings for Nova Canvas
+  image_analysis_enabled: true
+  max_image_size_mb: 10
+  supported_formats: ["pdf", "png", "jpg", "jpeg", "doc", "docx"]
+
+deployment:
+  aws_region: "us-east-1"
+  environment: "development"
+  auth_mode: "oauth"  # or "none" for development without auth
+  
+  # Development resource settings
+  memory_enabled: true
+  session_timeout_minutes: 60
+  
+  # Streamlit configuration
+  streamlit:
+    port: 8501  # Streamlit default port
+    host: "localhost"
+    
+  # Logging and debugging
+  log_level: "DEBUG"
+  enable_tool_logging: true
+  enable_performance_metrics: true
+
+# Development-specific overrides
+debug:
+  show_tool_calls: true
+  show_model_responses: true
+  enable_trace_logging: true
+  mock_large_files: false  # Set to true to use sample data instead of large files
