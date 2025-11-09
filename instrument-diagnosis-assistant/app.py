@@ -86,6 +86,37 @@ def get_all_uploaded_files():
     return all_files
 
 
+def get_log_files_only():
+    """Get only log files (gold_logs and failed_logs) from session state"""
+    log_files = []
+    if 'uploaded_files' in st.session_state:
+        # Only include log files, NOT documentation
+        for category in ['gold_logs', 'failed_logs']:
+            file_list = st.session_state.uploaded_files.get(category, [])
+            if file_list:
+                log_files.extend(file_list)
+    return log_files
+
+
+def get_documentation_summary():
+    """Get a summary of uploaded documentation files (not the content)"""
+    if 'uploaded_files' not in st.session_state:
+        return ""
+    
+    doc_files = st.session_state.uploaded_files.get('documentation', [])
+    if not doc_files:
+        return ""
+    
+    summary = ["\n=== SUPPLEMENTAL DOCUMENTATION AVAILABLE ==="]
+    summary.append(f"The user has uploaded {len(doc_files)} documentation file(s) as supplemental reference:")
+    for doc_file in doc_files:
+        summary.append(f"  - {doc_file.name} ({doc_file.size / 1024:.1f} KB)")
+    summary.append("These are reference documents (NOT logs to analyze).")
+    summary.append("Use your Knowledge Base as primary reference, and these as supplemental context if needed.")
+    summary.append("=" * 50)
+    return "\n".join(summary)
+
+
 # Import S3 integration functions
 from s3_integration import (
     upload_files_to_s3,
@@ -341,7 +372,13 @@ def clean_response_text(text: str, show_thinking: bool = True) -> str:
     text = re.sub(r"\n-\s+", r"\n- ", text)
     text = re.sub(r"^-\s+", r"- ", text)
 
-    # Handle section headers
+    # Convert ALL markdown headers to bold text (no large fonts)
+    # This must be done BEFORE other formatting to prevent headers from rendering
+    # Match any line starting with one or more # symbols followed by space and text
+    text = re.sub(r"^#{1,6}\s+(.+?)$", r"**\1**", text, flags=re.MULTILINE)
+    text = re.sub(r"\n#{1,6}\s+(.+?)$", r"\n**\1**", text, flags=re.MULTILINE)
+
+    # Handle section headers (text followed by colon)
     text = re.sub(r"\n([A-Za-z][A-Za-z\s]{2,30}):\s*\n", r"\n**\1:**\n\n", text)
 
     # Clean up multiple newlines
@@ -613,10 +650,10 @@ def main():
     st.title("🔧 Instrument Diagnosis Assistant")
     
     # Add file upload section at the top
-    st.markdown("### 📁 Upload Files for Analysis")
+    st.markdown("**📁 Upload Files for Analysis**")
     
     # Create tabs for different file types
-    tab1, tab2, tab3 = st.tabs(["📊 Log Files", "📋 Documentation", "🔍 Troubleshooting Guides"])
+    tab1, tab2 = st.tabs(["📊 Log Files", "📋 Documentation"])
     
     with tab1:
         st.markdown("**Upload instrument log files for analysis**")
@@ -642,23 +679,14 @@ def main():
             )
     
     with tab2:
-        st.markdown("**Upload engineering documentation and component specifications**")
-        engineering_docs = st.file_uploader(
-            "Engineering Documents",
-            type=['pdf', 'doc', 'docx', 'txt', 'md'],
+        st.markdown("**Upload reference documentation (NOT log files)**")
+        st.markdown("*Include troubleshooting guides, component specs, system architecture docs, repair procedures, etc.*")
+        documentation_files = st.file_uploader(
+            "Documentation Files",
+            type=['pdf', 'doc', 'docx', 'txt', 'md', 'png', 'jpg', 'jpeg'],
             accept_multiple_files=True,
-            key="eng_docs",
-            help="Upload component specifications, system architecture docs, etc."
-        )
-    
-    with tab3:
-        st.markdown("**Upload troubleshooting guides with images and diagrams**")
-        troubleshooting_guides = st.file_uploader(
-            "Troubleshooting Guides",
-            type=['pdf', 'doc', 'docx', 'png', 'jpg', 'jpeg'],
-            accept_multiple_files=True,
-            key="trouble_guides",
-            help="Upload multi-modal troubleshooting documentation"
+            key="documentation",
+            help="Upload reference documentation - these will be treated as supporting documentation, not as logs to analyze"
         )
     
     # Store uploaded files in session state
@@ -666,8 +694,7 @@ def main():
         st.session_state.uploaded_files = {
             'gold_logs': [],
             'failed_logs': [],
-            'eng_docs': [],
-            'trouble_guides': []
+            'documentation': []
         }
     
     # Update session state with uploaded files
@@ -675,10 +702,8 @@ def main():
         st.session_state.uploaded_files['gold_logs'] = gold_standard_logs
     if failed_unit_logs:
         st.session_state.uploaded_files['failed_logs'] = failed_unit_logs
-    if engineering_docs:
-        st.session_state.uploaded_files['eng_docs'] = engineering_docs
-    if troubleshooting_guides:
-        st.session_state.uploaded_files['trouble_guides'] = troubleshooting_guides
+    if documentation_files:
+        st.session_state.uploaded_files['documentation'] = documentation_files
     
     # Show file summary if files are uploaded
     total_files = sum(len(files) for files in st.session_state.uploaded_files.values())
@@ -693,8 +718,7 @@ def main():
                 category_names = {
                     'gold_logs': 'Gold Standard',
                     'failed_logs': 'Problem Unit', 
-                    'eng_docs': 'Engineering Docs',
-                    'trouble_guides': 'Troubleshooting Guides'
+                    'documentation': 'Documentation'
                 }
                 file_categories.append(f"{len(file_list)} {category_names.get(category, category)}")
                 
@@ -860,11 +884,8 @@ def main():
         # Diagnosis-specific options
         st.subheader("🔧 Diagnosis Options")
         
-        analysis_mode = st.selectbox(
-            "Analysis Mode",
-            ["Comprehensive Analysis", "Quick Diagnosis", "Component Focus", "Log Comparison Only"],
-            help="Choose the type of analysis to perform"
-        )
+        # Fixed to Comprehensive Analysis mode
+        analysis_mode = "Comprehensive Analysis"
         
         confidence_threshold = st.slider(
             "Confidence Threshold",
@@ -881,47 +902,27 @@ def main():
             help="Analyze images and diagrams in troubleshooting guides"
         )
         
-        # File processing options
-        st.subheader("📁 File Processing")
-        
-        file_processing_mode = st.selectbox(
-            "File Processing Mode",
-            ["Smart Truncation (Recommended)", "Minimal Content", "Summary Only"],
-            help="How to handle large files to prevent processing issues"
-        )
-        
-        # Set max content length based on mode
-        if file_processing_mode == "Smart Truncation (Recommended)":
-            max_file_content = 2000
-        elif file_processing_mode == "Minimal Content":
-            max_file_content = 1000
-        else:  # Summary Only
-            max_file_content = 500
-    
-        # Store max_file_content in session state for use throughout the app
+        # File processing - hardcoded to Smart Truncation (Recommended)
+        max_file_content = 2000
         st.session_state.max_file_content = max_file_content
         
-        # Response formatting options
+        # Response formatting options - hardcoded for simplicity
+        auto_format = True
+        show_raw = False
+        show_tools = True
+        show_thinking = False
+        
+        # Display Options
         st.subheader("Display Options")
-        auto_format = st.checkbox(
-            "Auto-format responses",
-            value=True,
-            help="Automatically clean and format responses",
-        )
-        show_raw = st.checkbox(
-            "Show raw response",
-            value=False,
-            help="Display the raw unprocessed response",
-        )
         show_tools = st.checkbox(
             "Show tools",
             value=True,
-            help="Display tools used",
+            help="Display tools used by the agent",
         )
         show_thinking = st.checkbox(
             "Show thinking",
             value=False,
-            help="Display the AI thinking text",
+            help="Display the AI thinking process",
         )
 
         # Clear chat button
@@ -974,12 +975,6 @@ def main():
             st.write(f"**Agent ARN:** {agent_arn}")
             st.write(f"**Session ID:** {runtime_session_id}")
             st.write(f"**Region:** {region}")
-            
-            # Show recent log messages
-            if st.button("Show Recent Logs"):
-                import logging
-                # This is a simple way to show logs - in production you'd want a proper log viewer
-                st.text("Check the console/terminal for detailed logs")
 
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -987,7 +982,7 @@ def main():
 
     # Diagnosis Results Display Section
     if 'diagnosis_results' in st.session_state and st.session_state.diagnosis_results:
-        st.markdown("### Latest Diagnosis Results")
+        st.markdown("**Latest Diagnosis Results**")
         
         results = st.session_state.diagnosis_results
         
@@ -1146,78 +1141,43 @@ def main():
             )
 
     # Quick action buttons
-    st.markdown("### 🚀 Quick Actions")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        if st.button("🔍 Analyze Logs"):
-            if not agent_arn:
-                st.error("Please select an agent in the sidebar first.")
-            elif not st.session_state.uploaded_files.get('failed_logs'):
-                st.error("Please upload problem unit logs first. Gold standard logs are optional.")
-            else:
-                # Include uploaded file contents
-                uploaded_files = get_all_uploaded_files()
-                file_contents = process_uploaded_files(uploaded_files, st.session_state.get('max_file_content', 2000))
-                # Check if we have gold standard logs for comparison
-                has_gold_logs = bool(st.session_state.uploaded_files.get('gold_logs'))
-                comparison_text = " Compare against the gold standard logs to identify deviations." if has_gold_logs else " Analyze for common failure patterns and anomalies."
-                
-                base_prompt = f"Please analyze the uploaded log files using {analysis_mode.lower()} mode with confidence threshold {confidence_threshold}. Focus on identifying failure patterns, error messages, and anomalies.{comparison_text} Provide a pass/fail determination with confidence level. IMPORTANT: Use only ASCII characters in your response - no emojis or Unicode symbols."
-                prompt = base_prompt + file_contents
-                st.session_state.messages.append({"role": "user", "content": base_prompt, "avatar": HUMAN_AVATAR})
-                st.session_state.pending_prompt = prompt
-                st.rerun()
-    
-    with col2:
-        if st.button("🔧 Identify Components"):
-            if not agent_arn:
-                st.error("Please select an agent in the sidebar first.")
-            else:
-                # Include uploaded file contents
-                uploaded_files = get_all_uploaded_files()
-                file_contents = process_uploaded_files(uploaded_files, st.session_state.get('max_file_content', 2000))
-                base_prompt = "Please identify all hardware and software components from the uploaded engineering documentation and create a comprehensive inventory. IMPORTANT: Use only ASCII characters in your response - no emojis or Unicode symbols."
-                prompt = base_prompt + file_contents
-                st.session_state.messages.append({"role": "user", "content": base_prompt, "avatar": HUMAN_AVATAR})
-                st.session_state.pending_prompt = prompt
-                st.rerun()
-    
-    with col3:
-        if st.button("📚 Process Guides"):
-            if not agent_arn:
-                st.error("Please select an agent in the sidebar first.")
-            else:
-                # Include uploaded file contents
-                uploaded_files = get_all_uploaded_files()
-                file_contents = process_uploaded_files(uploaded_files, st.session_state.get('max_file_content', 2000))
-                visual_text = " Include visual analysis of images and diagrams." if include_visual_analysis else ""
-                base_prompt = f"Please process the uploaded troubleshooting guides and extract relevant procedures.{visual_text} IMPORTANT: Use only ASCII characters in your response - no emojis or Unicode symbols."
-                prompt = base_prompt + file_contents
-                st.session_state.messages.append({"role": "user", "content": base_prompt, "avatar": HUMAN_AVATAR})
-                st.session_state.pending_prompt = prompt
-                st.rerun()
-    
-    with col4:
-        if st.button("🎯 Full Diagnosis"):
-            if not agent_arn:
-                st.error("Please select an agent in the sidebar first.")
-            elif not st.session_state.uploaded_files.get('failed_logs'):
-                st.error("Please upload problem unit logs first for diagnosis. Gold standard logs are optional.")
-            else:
-                # Include uploaded file contents
-                uploaded_files = get_all_uploaded_files()
-                file_contents = process_uploaded_files(uploaded_files, st.session_state.get('max_file_content', 2000))
-                # Check if we have gold standard logs for comparison
-                has_gold_logs = bool(st.session_state.uploaded_files.get('gold_logs'))
-                comparison_text = " Compare problem logs against gold standard logs where available." if has_gold_logs else " Focus on identifying failure patterns in the problem logs."
-                visual_text = " Include visual analysis." if include_visual_analysis else ""
-                
-                base_prompt = f"Please perform a comprehensive instrument diagnosis using all uploaded files. Use {analysis_mode.lower()} mode with {confidence_threshold} confidence threshold.{comparison_text}{visual_text} Provide pass/fail determination with detailed analysis. IMPORTANT: Use only ASCII characters in your response - no emojis or Unicode symbols."
-                prompt = base_prompt + file_contents
-                st.session_state.messages.append({"role": "user", "content": base_prompt, "avatar": HUMAN_AVATAR})
-                st.session_state.pending_prompt = prompt
-                st.rerun()
+    if st.button("🎯 Run Full Diagnosis"):
+        if not agent_arn:
+            st.error("Please select an agent in the sidebar first.")
+        elif not st.session_state.uploaded_files.get('failed_logs'):
+            st.error("Please upload problem unit logs first for diagnosis. Gold standard logs are optional.")
+        else:
+            # ONLY process LOG files for analysis (not documentation)
+            log_files = get_log_files_only()
+            log_contents = process_uploaded_files(log_files, st.session_state.get('max_file_content', 2000))
+            
+            # Get documentation summary (just file names, not content)
+            doc_summary = get_documentation_summary()
+            
+            # Check what types of files we have
+            has_gold_logs = bool(st.session_state.uploaded_files.get('gold_logs'))
+            has_documentation = bool(st.session_state.uploaded_files.get('documentation'))
+            
+            # Build context-aware prompt
+            comparison_text = " Compare problem logs against gold standard logs where available." if has_gold_logs else " Focus on identifying failure patterns in the problem logs."
+            doc_text = " Use your Knowledge Base (user guides, troubleshooting guides, design docs) as the primary reference." + (" The user has also uploaded supplemental documentation files for additional context." if has_documentation else "")
+            visual_text = " Include visual analysis of any images in the supplemental documentation." if include_visual_analysis and has_documentation else ""
+            
+            # Create user-friendly display message
+            num_logs = len(log_files)
+            log_type = "log file" if num_logs == 1 else "log files"
+            display_message = f"Run full diagnosis on {num_logs} uploaded {log_type}"
+            if has_gold_logs:
+                display_message += " (comparing against gold standard)"
+            
+            # Create full technical prompt for the agent
+            base_prompt = f"Please perform a comprehensive instrument diagnosis. ANALYZE ONLY the LOG FILES below using {analysis_mode.lower()} mode with {confidence_threshold} confidence threshold.{comparison_text}{doc_text}{visual_text} Provide pass/fail determination with detailed analysis and recommendations. IMPORTANT: Use only ASCII characters in your response - no emojis or Unicode symbols. Do NOT use markdown headers (# ## ###) - use bold text (**text**) for emphasis instead."
+            prompt = base_prompt + doc_summary + log_contents
+            
+            # Show user-friendly message in chat, but send full prompt to agent
+            st.session_state.messages.append({"role": "user", "content": display_message, "avatar": HUMAN_AVATAR})
+            st.session_state.pending_prompt = prompt
+            st.rerun()
 
     # Chat input
     if prompt := st.chat_input("Ask about instrument diagnosis, upload files, or request specific analysis..."):
@@ -1225,13 +1185,16 @@ def main():
             st.error("Please select an agent in the sidebar first.")
             return
 
-        # Include uploaded file contents if any
-        uploaded_files = get_all_uploaded_files()
-        file_contents = process_uploaded_files(uploaded_files, st.session_state.get('max_file_content', 2000))
+        # Include ONLY log files for analysis (not documentation)
+        log_files = get_log_files_only()
+        log_contents = process_uploaded_files(log_files, st.session_state.get('max_file_content', 2000))
+        
+        # Get documentation summary (just file names, not content)
+        doc_summary = get_documentation_summary()
         
         # Add ASCII-only instruction to user prompts
         ascii_instruction = " IMPORTANT: Please respond using only ASCII characters - no emojis or Unicode symbols."
-        full_prompt = prompt + ascii_instruction + file_contents
+        full_prompt = prompt + ascii_instruction + doc_summary + log_contents
         
         # Add user message to chat history (show only the user's text)
         st.session_state.messages.append(
