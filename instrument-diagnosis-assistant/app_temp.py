@@ -86,164 +86,111 @@ def get_all_uploaded_files():
     return all_files
 
 
-# Import S3 integration functions
-from s3_integration import (
-    upload_files_to_s3,
-    update_session_file_registry,
-    get_session_context,
-    load_existing_s3_files_for_session
-)
-
-
 def process_uploaded_files(uploaded_files, max_content_length: int = 2000) -> str:
-    """
-    Process uploaded files by uploading to S3 and returning S3 URI information for the agent.
-    
-    Args:
-        uploaded_files: List of Streamlit uploaded file objects
-        max_content_length: Unused (kept for compatibility)
-    
-    Returns:
-        Formatted string with S3 file information and agent instructions
-    """
-    # Note: st is already imported at module level
+    """Process uploaded files and return their contents as text, with smart truncation for large files"""
     if not uploaded_files:
-        # Check if we have files from previous uploads in this session
-        session_context = get_session_context(st.session_state)
-        if session_context:
-            return session_context
-        
-        # Try to load existing S3 files for this session
-        if 'runtime_session_id' in st.session_state:
-            load_existing_s3_files_for_session(st.session_state, st.session_state.runtime_session_id)
-            session_context = get_session_context(st.session_state)
-            if session_context:
-                return session_context
-        
         return ""
     
-    # Get session ID from Streamlit session state
-    if 'runtime_session_id' not in st.session_state:
-        st.session_state.runtime_session_id = str(uuid.uuid4())
-    session_id = st.session_state.runtime_session_id
+    def clean_unicode_text(text):
+        """Properly clean Unicode characters from text to prevent encoding issues"""
+        if isinstance(text, str):
+            try:
+                # Direct character-by-character approach
+                cleaned = ''.join(char if ord(char) < 128 else '?' for char in text)
+                return cleaned
+            except (UnicodeError, ValueError):
+                # Fallback approach
+                return text.encode('ascii', 'replace').decode('ascii')
+        return text
     
-    # Create progress callback for upload status
-    progress_placeholder = st.empty()
+    file_contents = []
+    file_contents.append(f"\n=== UPLOADED FILES ({len(uploaded_files)} files) ===")
     
-    def show_progress(current, total, filename):
-        progress_placeholder.info(f"⬆️ Uploading to S3: {filename} ({current}/{total})")
-    
-    # Upload files to S3 and get metadata
-    file_metadata = upload_files_to_s3(uploaded_files, session_id, progress_callback=show_progress)
-    
-    # Clear progress message
-    progress_placeholder.empty()
-    
-    if not file_metadata:
-        return "\n=== NO FILES SUCCESSFULLY UPLOADED TO S3 ===\n"
-    
-    # Update session registry
-    update_session_file_registry(st.session_state, file_metadata)
-    
-    # Create action summary with S3 file information
-    action_summary = []
-    action_summary.append("\n" + "="*60)
-    action_summary.append("CRITICAL INSTRUCTION: FILES ARE ALREADY UPLOADED TO S3")
-    action_summary.append("DO NOT ASK FOR FILES - USE S3 TOOLS IMMEDIATELY")
-    action_summary.append("="*60)
-    action_summary.append(f"AGENT ACTION REQUIRED: {len(file_metadata)} S3 FILES READY")
-    action_summary.append("="*60)
-    
-    # Sort files by size (largest first) and type (errors first)
-    sorted_files = sorted(file_metadata.items(), key=lambda x: (
-        'error' not in x[0].lower(),  # Error files first
-        -x[1]['file_size']  # Then by size (largest first)
-    ))
-    
-    total_size = sum(meta['file_size'] for meta in file_metadata.values())
-    action_summary.append(f"TOTAL SIZE: {total_size / (1024*1024):.2f} MB")
-    action_summary.append(f"S3 STORAGE: Files stored with session-based organization")
-    action_summary.append("")
-    
-    # Handle multiple files intelligently
-    if len(file_metadata) > 3:
-        action_summary.append("MULTIPLE FILES DETECTED - CRITICAL: Process ONE file at a time to avoid token limits")
-        action_summary.append("PRIORITY ORDER: Error logs first, then by size")
-        action_summary.append("STRATEGY: Analyze first file only, provide diagnosis, then user can request next file")
-        action_summary.append("")
-    
-    files_processed = 0
-    # CRITICAL: For multiple large files, only show the FIRST file to avoid token limits
-    max_files_to_show = 1 if len(file_metadata) > 2 and any(m['file_size'] > 500*1024 for m in file_metadata.values()) else 3
-    
-    for original_name, metadata in sorted_files:
-        file_size = metadata['file_size']
-        s3_uri = metadata['s3_uri']
-        s3_key = metadata['key']
+    for file in uploaded_files:
+        # Clean filename to avoid Unicode issues
+        clean_filename = clean_unicode_text(file.name)
+        file_contents.append(f"\n--- FILE: {clean_filename} ({file.size} bytes) ---")
         
-        action_summary.append(f"\n📁 FILE {files_processed + 1}: {original_name}")
-        action_summary.append(f"   S3_URI: {s3_uri}")
-        action_summary.append(f"   SIZE: {file_size / (1024*1024):.2f} MB")
+        try:
+            # Read file content based on type
+            if file.type == "text/plain" or file.name.endswith(('.txt', '.log', '.csv')):
+                # Text files - with smart truncation
+                content = file.read().decode('utf-8')
+                # Clean Unicode characters from file content
+                content = clean_unicode_text(content)
+                
+                if len(content) > max_content_length:
+                    # For large files, provide a summary approach
+                    lines = content.split('\n')
+                    total_lines = len(lines)
+                    
+                    if total_lines > 50:
+                        # Include first 15 lines and last 15 lines only
+                        first_part = '\n'.join(lines[:15])
+                        last_part = '\n'.join(lines[-15:])
+                        
+                        # Try to extract key information from the middle
+                        error_lines = [line for line in lines if any(keyword in line.lower() 
+                                     for keyword in ['error', 'fail', 'exception', 'warning', 'critical'])]
+                        
+                        summary_info = f"File Statistics: {total_lines} total lines, {len(content)} characters"
+                        if error_lines:
+                            summary_info += f", {len(error_lines)} lines with errors/warnings"
+                            # Include up to 5 error lines as examples
+                            error_sample = '\n'.join(error_lines[:5])
+                            if len(error_lines) > 5:
+                                error_sample += f"\n[... and {len(error_lines) - 5} more error lines]"
+                        
+                        truncated_content = f"{first_part}\n\n[SUMMARY: {summary_info}]\n"
+                        if error_lines:
+                            truncated_content += f"\n[KEY ERROR SAMPLES]:\n{error_sample}\n"
+                        truncated_content += f"\n[TRUNCATED: {total_lines - 30} middle lines omitted]\n\n{last_part}"
+                        
+                        file_contents.append(f"LOG CONTENT (intelligently truncated):\n{truncated_content}")
+                    else:
+                        # For smaller files, just truncate the content
+                        truncated_content = content[:max_content_length] + f"\n\n[TRUNCATED: {len(content) - max_content_length} characters omitted]"
+                        file_contents.append(f"LOG CONTENT (truncated):\n{truncated_content}")
+                else:
+                    file_contents.append(f"LOG CONTENT:\n{content}")
+                    
+            elif file.type == "application/json" or file.name.endswith('.json'):
+                # JSON files - with truncation
+                content = file.read().decode('utf-8')
+                # Clean Unicode characters from JSON content
+                content = clean_unicode_text(content)
+                if len(content) > max_content_length:
+                    truncated_content = content[:max_content_length] + f"\n[TRUNCATED: {len(content) - max_content_length} characters omitted]"
+                    file_contents.append(f"JSON Content (truncated):\n{truncated_content}")
+                else:
+                    file_contents.append(f"JSON Content:\n{content}")
+                    
+            elif file.type.startswith('image/'):
+                # Image files - just note that they're uploaded
+                file_contents.append(f"[IMAGE FILE: {file.name} - {file.size} bytes - Available for visual analysis]")
+            else:
+                # Other files - try to read as text with truncation
+                try:
+                    content = file.read().decode('utf-8')
+                    # Clean Unicode characters from content
+                    content = clean_unicode_text(content)
+                    if len(content) > max_content_length:
+                        truncated_content = content[:max_content_length] + f"\n[TRUNCATED: {len(content) - max_content_length} characters omitted]"
+                        file_contents.append(f"CONTENT (truncated):\n{truncated_content}")
+                    else:
+                        file_contents.append(f"CONTENT:\n{content}")
+                except UnicodeDecodeError:
+                    file_contents.append(f"[BINARY FILE: {file.name} - {file.size} bytes - Cannot display content]")
+        except Exception as e:
+            file_contents.append(f"[ERROR reading {file.name}: {str(e)}]")
         
-        # Provide S3-based analysis instructions - use summary for files >500KB
-        if file_size > 500 * 1024:  # Files > 500KB
-            action_summary.append(f"   ⚡ ACTION: extract_s3_log_summary(s3_uri='{s3_uri}')")
-            action_summary.append(f"   REASON: File >{file_size / (1024*1024):.1f}MB - MUST use summary for speed")
-        else:
-            action_summary.append(f"   ⚡ ACTION: get_s3_file_content(s3_uri='{s3_uri}')")
-            action_summary.append(f"   REASON: Small file - can retrieve full content")
-        
-        action_summary.append("")
-        
-        files_processed += 1
-        # CRITICAL: Limit to avoid token limits with multiple large files
-        if files_processed >= max_files_to_show:
-            remaining_files = len(file_metadata) - files_processed
-            if remaining_files > 0:
-                action_summary.append(f"[{remaining_files} additional files available - process one at a time]")
-                action_summary.append(f"IMPORTANT: Analyze the first file above, then user can request next file")
-                action_summary.append(f"Use list_session_logs(session_id='{session_id}') to see all files")
-            break
+        # Reset file pointer for potential re-reading
+        file.seek(0)
     
-    # Add appropriate action based on file count
-    action_summary.append("\n" + "="*60)
-    action_summary.append("⚡ IMMEDIATE NEXT STEPS:")
-    action_summary.append("="*60)
-    
-    if len(file_metadata) == 1:
-        first_file = list(file_metadata.values())[0]
-        if first_file['file_size'] > 500 * 1024:  # 500KB threshold
-            action_summary.append(f"1. Call: extract_s3_log_summary(s3_uri='{first_file['s3_uri']}')")
-            action_summary.append(f"2. Call: analyze_log_content(summary_from_step_1, '')")
-            action_summary.append(f"3. Provide diagnosis results")
-            action_summary.append(f"CRITICAL: File is {first_file['file_size'] / (1024*1024):.1f}MB - MUST use extract_s3_log_summary")
-        else:
-            action_summary.append(f"1. Call: get_s3_file_content(s3_uri='{first_file['s3_uri']}')")
-            action_summary.append(f"2. Call: analyze_log_content(content_from_step_1, '')")
-            action_summary.append(f"3. Provide diagnosis results")
-    elif len(file_metadata) <= 3:
-        action_summary.append("CRITICAL: Process files ONE AT A TIME to avoid token limits")
-        action_summary.append("1. Analyze ONLY the first file listed above")
-        action_summary.append("2. If file >500KB: Call extract_s3_log_summary(s3_uri='...') - REQUIRED FOR SPEED")
-        action_summary.append("   If file <500KB: Call get_s3_file_content(s3_uri='...')")
-        action_summary.append("3. Call: analyze_log_content(content_or_summary, '')")
-        action_summary.append("4. Provide diagnosis for this file")
-        action_summary.append("5. User can then request analysis of next file if needed")
-    else:
-        action_summary.append("CRITICAL: MANY FILES DETECTED - Process ONE file at a time")
-        action_summary.append(f"1. Analyze ONLY the first file listed above")
-        action_summary.append("2. If file >500KB: extract_s3_log_summary(s3_uri='...') - REQUIRED")
-        action_summary.append("   If file <500KB: get_s3_file_content(s3_uri='...')")
-        action_summary.append("3. Provide diagnosis for this ONE file")
-        action_summary.append("4. DO NOT process additional files in same response - token limit will be exceeded")
-        action_summary.append(f"5. User can request next file analysis separately")
-        action_summary.append(f"Available: list_session_logs(session_id='{session_id}') to see all files")
-    
-    action_summary.append("")
-    action_summary.append("🚫 DO NOT ASK USER TO UPLOAD FILES - THEY ARE ALREADY IN S3")
-    action_summary.append("="*60)
-    
-    return '\n'.join(action_summary)
+    file_contents.append("\n=== END OF UPLOADED FILES ===\n")
+    result = "\n".join(file_contents)
+    # Final cleaning of the entire file contents string
+    return clean_unicode_text(result)
 
 
 def fetch_agent_runtimes(region: str = "us-east-1") -> List[Dict]:
@@ -467,142 +414,6 @@ def parse_streaming_chunk(chunk: str) -> str:
         # If all parsing fails, return the chunk as-is
         logger.debug("parse_streaming_chunk: All parsing failed, returning chunk as-is")
         return chunk
-
-
-def invoke_agent_streaming(
-    prompt: str,
-    agent_arn: str,
-    runtime_session_id: str,
-    region: str = "us-east-1",
-    show_tool: bool = True,
-) -> Iterator[str]:
-    """Invoke agent and yield streaming response chunks using boto3 bedrock-agentcore client"""
-    
-    try:
-        # Use boto3 bedrock-agentcore client with extended timeout for S3 operations
-        config = Config(
-            read_timeout=600,  # 10 minutes for complex analysis
-            connect_timeout=60,
-            retries={'max_attempts': 3, 'mode': 'adaptive'}
-        )
-        
-        client = boto3.client('bedrock-agentcore', region_name=region, config=config)
-        
-        # Log the prompt for debugging
-        logger.info(f"Invoking agent via boto3 bedrock-agentcore client")
-        logger.info(f"Prompt length: {len(prompt)} characters")
-        logger.info(f"Prompt contains 's3://': {('s3://' in prompt)}")
-        logger.info(f"First 500 chars: {prompt[:500]}")
-        
-        # Ensure session ID meets minimum length requirement (33 characters)
-        if len(runtime_session_id) < 33:
-            runtime_session_id = str(uuid.uuid4())
-            logger.info(f"Generated new session ID: {runtime_session_id}")
-        
-        # Create payload
-        payload = {"prompt": prompt}
-        payload_bytes = json.dumps(payload).encode('utf-8')
-        
-        logger.info(f"Payload size: {len(payload_bytes)} bytes")
-        
-        # Invoke the agent using boto3 bedrock-agentcore client
-        response = client.invoke_agent_runtime(
-            agentRuntimeArn=agent_arn,
-            runtimeSessionId=runtime_session_id,
-            payload=payload_bytes,
-            contentType='application/json',
-            accept='application/json'
-        )
-        
-        logger.info(f"Agent invoked successfully, streaming response...")
-        
-        # Stream the response chunks
-        # The response format is text/event-stream with raw bytes
-        event_stream = response.get('response', [])
-        
-        for event in event_stream:
-            # The event is raw bytes in SSE (Server-Sent Events) format
-            if isinstance(event, bytes):
-                try:
-                    # Decode the bytes to text
-                    text = event.decode('utf-8', errors='replace')
-                    
-                    # SSE format: Each chunk may contain multiple "data: <content>\n\n" lines
-                    # Split by "data: " to get individual messages
-                    lines = text.split('data: ')
-                    
-                    for line in lines:
-                        if not line.strip():
-                            continue
-                            
-                        # Remove trailing newlines
-                        content = line.rstrip('\n')
-                        
-                        # Remove quotes if present (SSE often wraps content in quotes)
-                        if content.startswith('"') and content.endswith('"'):
-                            content = content[1:-1]
-                        
-                        # Unescape common escape sequences
-                        content = content.replace('\\n', '\n').replace('\\t', '\t')
-                        
-                        if content:  # Only yield non-empty content
-                            yield content
-                        
-                except Exception as e:
-                    logger.error(f"Error decoding event: {e}")
-                    continue
-                    
-            # Handle dict format (fallback for different response types)
-            elif isinstance(event, dict):
-                if 'chunk' in event:
-                    chunk_data = event['chunk']
-                    if 'bytes' in chunk_data:
-                        text = chunk_data['bytes'].decode('utf-8', errors='replace')
-                        yield text
-                        
-                elif 'trace' in event and show_tool:
-                    trace_data = event['trace']
-                    trace_text = json.dumps(trace_data, indent=2)
-                    logger.debug(f"Trace: {trace_text}")
-                    
-                elif 'internalServerException' in event:
-                    error_msg = event['internalServerException'].get('message', 'Internal server error')
-                    logger.error(f"Internal server error: {error_msg}")
-                    yield f"\n\n**Error**: {error_msg}\n\n"
-                    
-                elif 'validationException' in event:
-                    error_msg = event['validationException'].get('message', 'Validation error')
-                    logger.error(f"Validation error: {error_msg}")
-                    yield f"\n\n**Error**: {error_msg}\n\n"
-                    
-                elif 'throttlingException' in event:
-                    error_msg = event['throttlingException'].get('message', 'Request throttled')
-                    logger.error(f"Throttling error: {error_msg}")
-                    yield f"\n\n**Error**: {error_msg}\n\n"
-        
-        logger.info("Agent streaming completed successfully")
-            
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)
-        
-        logger.error(f"Exception during agent invocation: {error_type}: {error_msg}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
-        
-        # Check for specific error types
-        if "ended prematurely" in error_msg.lower():
-            yield f"\n\n**Response Incomplete**: The agent's response was cut off. This may be due to:\n"
-            yield f"- Large file processing taking too long\n"
-            yield f"- Network timeout\n"
-            yield f"- Model output limit reached\n\n"
-            yield f"Try asking: 'Continue the analysis' or 'Provide summary only'\n\n"
-        elif "token" in error_msg.lower() and "exceed" in error_msg.lower():
-            yield f"\n\n**Token Limit Exceeded**: The input or output was too large.\n"
-            yield f"Try: 'Analyze one file at a time' or 'Provide brief summary'\n\n"
-        else:
-            yield f"\n\n**Error**: {error_type}: {error_msg}\n\n"
-
 
 
 def main():

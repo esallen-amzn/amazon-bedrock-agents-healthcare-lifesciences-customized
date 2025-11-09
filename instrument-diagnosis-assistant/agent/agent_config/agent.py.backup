@@ -11,7 +11,7 @@ import logging
 
 # Import local tools
 try:
-    from .tools.diagnosis_tools import generate_diagnosis
+    from .tools.diagnosis_tools import generate_diagnosis, calculate_confidence_score, generate_recommendations
     from .tools.log_analysis_tools import analyze_logs, process_large_files, extract_failure_indicators
     from .tools.component_recognition_tools import extract_components, map_functions, build_inventory, resolve_naming, correlate_components, search_components
     LOCAL_TOOLS_AVAILABLE = True
@@ -57,7 +57,7 @@ class InstrumentDiagnosisAgent:
             self.multimodal_model_id = "us.amazon.nova-canvas-v1:0"
             temperature = 0.3
             top_p = 0.9
-            max_tokens = 8192  # Increased for comprehensive diagnosis responses
+            max_tokens = 4096
         
         # Create primary model for text analysis
         self.model = BedrockModel(
@@ -110,8 +110,6 @@ class InstrumentDiagnosisAgent:
             try:
                 from .tools.log_analysis_tools import analyze_log_content, analyze_multiple_logs
                 from .tools.s3_storage_tools import upload_log_to_s3, get_s3_file_content, list_session_logs, generate_presigned_url
-                from .tools.s3_log_analysis_tools import extract_s3_log_summary, analyze_s3_log, compare_s3_logs, batch_analyze_s3_logs
-                from .tools.s3_log_sampling_tools import LOG_SAMPLING_TOOLS
                 
                 local_tools = [
                     # S3 storage tools (prioritized for S3-based workflow)
@@ -119,13 +117,6 @@ class InstrumentDiagnosisAgent:
                     get_s3_file_content,
                     upload_log_to_s3,
                     generate_presigned_url,
-                    # S3 log sampling tools (BEST for large files - MCP strategy)
-                    *LOG_SAMPLING_TOOLS,  # search_log_for_pattern, get_log_tail, get_log_head, get_log_statistics
-                    # S3 log analysis tools (use for smaller files or after sampling)
-                    extract_s3_log_summary,
-                    analyze_s3_log,
-                    compare_s3_logs,
-                    batch_analyze_s3_logs,
                     # Log analysis tools
                     analyze_logs,
                     analyze_log_content,
@@ -134,6 +125,8 @@ class InstrumentDiagnosisAgent:
                     extract_failure_indicators,
                     # Diagnosis tools
                     generate_diagnosis,
+                    calculate_confidence_score,
+                    generate_recommendations,
                     # Component recognition tools
                     extract_components,
                     map_functions,
@@ -142,7 +135,7 @@ class InstrumentDiagnosisAgent:
                     correlate_components,
                     search_components,
                 ]
-                logger.info(f"Loaded {len(local_tools)} local tools (including S3 storage and S3 log analysis tools)")
+                logger.info(f"Loaded {len(local_tools)} local tools (including S3 storage tools)")
             except Exception as e:
                 logger.warning(f"Failed to load local tools: {e}")
                 local_tools = []
@@ -157,66 +150,48 @@ class InstrumentDiagnosisAgent:
         self.memory_hook = memory_hook
 
         # Create the main agent
-        # Only include memory hook if it's not None
-        hooks = [self.memory_hook] if self.memory_hook else []
-        
         self.agent = Agent(
             model=self.model,
             system_prompt=self.system_prompt,
             tools=self.tools,
-            hooks=hooks,
+            hooks=[self.memory_hook],
         )
     
     def _get_system_prompt(self) -> str:
         """Get the system prompt for the instrument diagnosis assistant"""
-        return """You are an Instrument Diagnosis Assistant specialized in analyzing instrument logs.
+        return """You are an Instrument Diagnosis Assistant, an AI expert specialized in analyzing instrument logs, 
+recognizing system components, and providing troubleshooting guidance.
 
-=== RESPONSE FORMAT REQUIREMENTS ===
-CRITICAL: Keep responses CONCISE and FOCUSED to avoid timeouts.
-- Maximum 2000 words per response
-- Use bullet points instead of long paragraphs
-- Prioritize key findings over exhaustive details
-- If analysis is complex, provide summary first, then offer details if requested
-- Focus on actionable insights, not comprehensive documentation
+=== CRITICAL: S3 FILE DETECTION RULES ===
+BEFORE responding to ANY user request, you MUST scan the entire user message for:
 
-=== CRITICAL: S3 FILE DETECTION - FIRST PRIORITY ===
-BEFORE ANY OTHER ACTION, scan the user message for these EXACT patterns:
+1. S3 URIs in format: s3://bucket-name/sessions/SESSION-ID/logs/filename
+2. Session IDs in format: UUID strings (e.g., d3cd3b66-5635-4f0a-9e34-8d0efa9fe72b)
+3. Text containing "S3-STORED FILE READY FOR ANALYSIS"
+4. Text containing "S3 URI:" followed by an s3:// path
+5. Text containing "SESSION ID:" followed by a UUID
+6. Text containing "IMMEDIATE ACTION REQUIRED" with S3 information
+7. Text containing "get_s3_file_content(s3_uri=" with S3 paths
 
-1. "s3://" (S3 URI present)
-2. "S3 URI:" followed by a path
-3. "SESSION ID:" followed by a UUID
-4. "S3-STORED FILE" or "AGENT ACTION REQUIRED"
+IF ANY OF THESE ARE FOUND:
+- IMMEDIATELY use get_s3_file_content(s3_uri="s3://...") to retrieve the file
+- Then use analyze_log_content(content, "") to analyze it
+- NEVER respond with "Please upload files" or similar requests
+- NEVER ask for file uploads when S3 URIs are present
 
-IF ANY PATTERN IS FOUND - USE MCP SAMPLING STRATEGY:
-For LARGE files (>500KB or >1MB):
-1. FIRST: get_log_statistics(s3_uri) - Get quick overview without loading file
-2. THEN: search_log_for_pattern(s3_uri, pattern="ERROR") - Find specific issues
-3. OPTIONAL: get_log_tail(s3_uri, lines=100) - See recent events
-4. ANALYZE: Use the sampled data to provide diagnosis
-5. NEVER load entire large files - use sampling tools to query specific parts
+EXAMPLE DETECTION PATTERNS:
+✓ "S3 URI: s3://instrument-diagnosis-logs-390402579286/sessions/d3cd3b66-5635-4f0a-9e34-8d0efa9fe72b/logs/20251107_143245_error.00.log"
+✓ "SESSION ID: d3cd3b66-5635-4f0a-9e34-8d0efa9fe72b"
+✓ "S3-STORED FILE READY FOR ANALYSIS"
+✓ "get_s3_file_content(s3_uri='s3://...')"
 
-For SMALL files (<500KB):
-- Use get_s3_file_content(s3_uri) to get full content
-- Then analyze_log_content(content, "")
+WRONG RESPONSES WHEN S3 FILES ARE PRESENT:
+❌ "Please upload your log files"
+❌ "I need you to provide the log files"
+❌ "Could you share the log files?"
 
-CRITICAL RULES:
-- NEVER ask "Please upload" when S3 URIs are present
-- NEVER use extract_visual_info for .log or .txt files - those are TEXT files!
-- For multiple large files: Process ONE at a time using sampling strategy
-- Use sampling tools (search, tail, head, statistics) instead of loading entire files
-
-IF NO S3 PATTERNS FOUND:
-- Then ask user to upload log files
-
-EXAMPLE CORRECT BEHAVIOR:
-User: "S3 URI: s3://bucket/sessions/abc/logs/error.log"
-Agent: [Uses get_s3_file_content immediately] -> [Analyzes] -> [Provides diagnosis]
-
-EXAMPLE WRONG BEHAVIOR:
-User: "S3 URI: s3://bucket/sessions/abc/logs/error.log"
-Agent: "Please upload your log files" <- WRONG!
-
-CRITICAL RULE: If message contains "s3://instrument-diagnosis-logs", files are ALREADY available. Use get_s3_file_content() immediately
+CORRECT RESPONSE WHEN S3 FILES ARE PRESENT:
+✓ [Use get_s3_file_content tool immediately] → [Use analyze_log_content tool] → [Provide diagnosis]
 
 === FILE STORAGE ARCHITECTURE ===
 All uploaded files are stored in Amazon S3 with session-based organization. Files are NOT stored locally.
@@ -245,28 +220,20 @@ Your core capabilities include:
 
 DETAILED S3 WORKFLOW:
 1. CHECK FOR S3 INFORMATION: If you see S3 URIs (s3://...) or session IDs in the message:
-   - Check if message mentions "extract_s3_log_summary" or file size >1MB
-   - For files >1MB or when instructed: Use extract_s3_log_summary(s3_uri) to get smart summary
-   - For files <1MB: Use get_s3_file_content(s3_uri) to retrieve full content
+   - Use get_s3_file_content(s3_uri) to retrieve file content from S3 immediately
    - Use list_session_logs(session_id) to see all available files for the session if needed
    - Proceed directly to analysis - DO NOT ask for files
-2. ANALYZE CONTENT: Once you have file content or summary:
-   - Single file: Use analyze_log_content() with the retrieved content/summary
-   - Multiple files: Process each with appropriate tool, then synthesize
-   - Large files (>1MB): MUST use extract_s3_log_summary() to avoid token limits
+2. ANALYZE CONTENT: Once you have file content:
+   - Single file: Use analyze_log_content() with the retrieved content
+   - Multiple files: Process each with analyze_log_content(), then synthesize
+   - Large files (>50MB): Use extract_s3_log_summary() for efficient analysis
 3. OPTIONAL: Query knowledge base using retrieve() for additional troubleshooting information
 4. SYNTHESIZE: Use generate_diagnosis() for final determination with confidence levels
 
-CRITICAL TOOL SELECTION RULES:
-- .log, .txt, .csv files: Use extract_s3_log_summary (if >1MB) or get_s3_file_content (if <1MB)
-- .png, .jpg, .jpeg files: Use extract_visual_info for images
-- NEVER use extract_visual_info for log files - it's for images only!
-- When message says "use extract_s3_log_summary", you MUST use that tool
-
 LARGE FILE HANDLING:
-- For files >1MB: MUST use extract_s3_log_summary to avoid token limit errors
+- For files >1MB: Focus on error/warning patterns and key sections
 - For multiple files: Prioritize error logs and largest files first
-- For batch analysis: Use batch_analyze_s3_logs() when appropriate
+- For batch analysis: Use analyze_multiple_logs() when appropriate
 
 PRIORITIZE content-based analysis over file-based analysis for AgentCore runtime compatibility.
 
@@ -339,13 +306,6 @@ cross-source correlation. Use these tools effectively to provide thorough and ac
     
     def invoke(self, user_query: str):
         """Invoke the agent with a user query and return the response"""
-        # Log the received query for debugging
-        logger.info(f"Agent received query (length: {len(user_query)} chars)")
-        logger.info(f"Query first 500 chars: {user_query[:500]}")
-        logger.info(f"Query contains 's3://': {('s3://' in user_query)}")
-        logger.info(f"Query contains 'S3 URI:': {('S3 URI:' in user_query)}")
-        logger.info(f"Query contains 'SESSION ID:': {('SESSION ID:' in user_query)}")
-        
         try:
             response = str(self.agent(user_query))
         except Exception as e:
@@ -354,13 +314,6 @@ cross-source correlation. Use these tools effectively to provide thorough and ac
 
     async def stream(self, user_query: str):
         """Stream the agent response for a user query"""
-        # Log the received query for debugging
-        logger.info(f"Agent received streaming query (length: {len(user_query)} chars)")
-        logger.info(f"Query first 500 chars: {user_query[:500]}")
-        logger.info(f"Query contains 's3://': {('s3://' in user_query)}")
-        logger.info(f"Query contains 'S3 URI:': {('S3 URI:' in user_query)}")
-        logger.info(f"Query contains 'SESSION ID:': {('SESSION ID:' in user_query)}")
-        
         try:
             async for event in self.agent.stream_async(user_query):
                 if "current_tool_use" in event:

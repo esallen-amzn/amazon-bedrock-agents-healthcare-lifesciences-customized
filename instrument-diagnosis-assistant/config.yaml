@@ -1,4 +1,4 @@
-# Minimal configuration for Instrument Diagnosis Assistant
+# Configuration for Instrument Diagnosis Assistant
 
 models:
   text_model: "us.amazon.nova-pro-v1:0"
@@ -6,10 +6,38 @@ models:
   embedding_model: "amazon.titan-embed-text-v2:0"
   temperature: 0.3
   top_p: 0.9
-  max_tokens: 4096
+  max_tokens: 8192  # Increased for comprehensive diagnosis responses
+
+knowledge_base:
+  kb_id: "E9DAYQSO7C"
+  retrieval_config:
+    max_results: 10
+    score_threshold: 0.7
+
+s3_storage:
+  bucket_name: ""  # Will be populated from SSM parameter
+  region: "us-east-1"
+  prefix: "sessions"
+  lifecycle_days: 7
+  enable_versioning: false
+  encryption: "AES256"
+  max_file_size_mb: 500
+  allowed_extensions: [".log", ".txt", ".csv", ".out", ".err"]
+
+log_analysis:
+  chunk_size_mb: 10
+  stream_buffer_size: 8192
+  failure_threshold: 0.8
+  confidence_threshold: 0.75
+  max_summary_length: 5000
+
+component_recognition:
+  entity_confidence: 0.6
+  naming_variations: true
 
 deployment:
   aws_region: "us-east-1"
-  streamlit:
-    port: 8501
-    host: "localhost"
+  auth_mode: "oauth"
+  environment: "development"
+  debug_logging: false
+  session_timeout: 30

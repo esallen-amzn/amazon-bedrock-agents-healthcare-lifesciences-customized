@@ -1,0 +1,34 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:InvokeAgent",
+        "bedrock-agentcore:InvokeRuntime"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:us-east-1:390402579286:runtime/InstrumentDiagnosisAgent-q6zAEqCEFd"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::instrument-diagnosis-logs-390402579286",
+        "arn:aws:s3:::instrument-diagnosis-logs-390402579286/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:us-east-1:390402579286:parameter/app/myapp/*"
+    }
+  ]
+}

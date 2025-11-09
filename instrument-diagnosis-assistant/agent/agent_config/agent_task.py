@@ -63,33 +63,9 @@ async def agent_task(user_message: str, session_id: str, actor_id: str):
                 config_manager = None
                 config = None
 
-            # Create memory hook with fallback
-            try:
-                memory_id = get_ssm_parameter("/app/myapp/agentcore/memory_id")
-                memory_hook = MemoryHook(
-                    memory_client=memory_client,
-                    memory_id=memory_id,
-                    actor_id=actor_id,
-                    session_id=session_id,
-                )
-                logger.info(f"Memory hook initialized with ID: {memory_id}")
-            except Exception as e:
-                logger.warning(f"Error creating memory hook, using fallback: {e}")
-                # Use a fallback memory hook or None
-                try:
-                    # Try to use the known memory ID from agentcore status
-                    fallback_memory_id = "instrument_diagnosis_assistant_mem-vtn85A4peW"
-                    memory_hook = MemoryHook(
-                        memory_client=memory_client,
-                        memory_id=fallback_memory_id,
-                        actor_id=actor_id,
-                        session_id=session_id,
-                    )
-                    logger.info(f"Using fallback memory ID: {fallback_memory_id}")
-                except Exception as fallback_error:
-                    logger.warning(f"Fallback memory also failed: {fallback_error}")
-                    # Create a minimal memory hook
-                    memory_hook = None
+            # TEMPORARILY DISABLE MEMORY to test if it's causing prompt truncation
+            logger.info("Memory hook DISABLED for testing - prompts should not be truncated")
+            memory_hook = None
 
             # Create agent with configuration
             try:

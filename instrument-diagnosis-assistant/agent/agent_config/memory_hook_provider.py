@@ -39,6 +39,18 @@ class MemoryHook(HookProvider):
                             {"role": role, "content": [{"text": content}]}
                         )
 
+                # CRITICAL FIX: Ensure conversation starts with user message
+                # If first message is not from user, remove it or prepend a user message
+                if context_messages and context_messages[0]["role"] != "user":
+                    # Find first user message
+                    first_user_idx = next((i for i, msg in enumerate(context_messages) if msg["role"] == "user"), None)
+                    if first_user_idx is not None:
+                        # Start from first user message
+                        context_messages = context_messages[first_user_idx:]
+                    else:
+                        # No user messages found, clear context
+                        context_messages = []
+
                 # context = "\n".join(context_messages)
                 # Add context to agent's system prompt.
                 event.agent.system_prompt += """
@@ -46,7 +58,10 @@ class MemoryHook(HookProvider):
                 Strictly use user preferences and user facts to know more about the user.
                 Also be aware that this information can be outdated.
                 """
-                event.agent.messages = context_messages
+                
+                # Only set messages if we have valid conversation history
+                if context_messages:
+                    event.agent.messages = context_messages
 
         except Exception as e:
             print(f"Memory load error: {e}")

@@ -44,7 +44,7 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:GetDownloadUrlForLayer
                 Resource:
-                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/bedrock-agentcore-myapp*
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/bedrock-agentcore-*
               - Effect: Allow
                 Action:
                   - logs:DescribeLogStreams
@@ -131,7 +131,7 @@ Resources:
                   - bedrock-agentcore:GetEvent
                   - bedrock-agentcore:ListEvents
                 Resource:
-                  - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/myapp*
+                  - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/*
               - Sid: BedrockKnowledgeBase
                 Effect: Allow
                 Action:
@@ -151,6 +151,17 @@ Resources:
                   - cognito-idp:ListUserPools
                 Resource:
                   - !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+              - Sid: S3LogStorage
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:GetObjectVersion
+                Resource:
+                  - !GetAtt LogStorageBucket.Arn
+                  - !Sub ${LogStorageBucket.Arn}/*
 
   GatewayAgentCoreRole:
     Type: AWS::IAM::Role
@@ -178,6 +189,44 @@ Resources:
 
 
   # Lambda target
+  # S3 Bucket for log storage
+  LogStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub instrument-diagnosis-logs-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 7
+            Prefix: sessions/
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - HEAD
+            AllowedOrigins:
+              - "*"
+            MaxAge: 3000
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Application
+          Value: InstrumentDiagnosis
+        - Key: Purpose
+          Value: LogStorage
+
   MyAppLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -191,6 +240,20 @@ Resources:
             Effect: Allow
             Principal:
               Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt LogStorageBucket.Arn
+                  - !Sub ${LogStorageBucket.Arn}/*
       
 
   MyAppLambda:
@@ -235,5 +298,25 @@ Resources:
       Type: String
       Value: !GetAtt MyAppLambda.Arn
       Description: ARN of the lambda that integrates with agentcore
+      Tags:
+        Application: MyApp
+
+  S3BucketNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/myapp/s3/bucket_name
+      Type: String
+      Value: !Ref LogStorageBucket
+      Description: S3 bucket name for log storage
+      Tags:
+        Application: MyApp
+
+  S3BucketArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/myapp/s3/bucket_arn
+      Type: String
+      Value: !GetAtt LogStorageBucket.Arn
+      Description: S3 bucket ARN for log storage
       Tags:
         Application: MyApp

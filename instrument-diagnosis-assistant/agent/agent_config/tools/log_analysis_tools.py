@@ -240,71 +240,109 @@ _log_processor = LogProcessor()
 
 @tool(
     name="analyze_logs",
-    description="Compare log files against gold standard patterns to identify failures and anomalies"
+    description="Analyze log files with optional gold standard comparison to identify failures and anomalies. Can process single files or multiple files in batch."
 )
 def analyze_logs(
     test_log_path: str,
-    baseline_log_path: str,
+    baseline_log_path: str = "",
     analysis_type: str = "full"
 ) -> Dict[str, Any]:
     """
-    Analyze log files by comparing against gold standard baseline.
+    Analyze log files with optional gold standard baseline comparison.
     
     Args:
         test_log_path: Path to the log file to analyze
-        baseline_log_path: Path to the gold standard log file for comparison
+        baseline_log_path: Optional path to the gold standard log file for comparison (empty string if not available)
         analysis_type: Type of analysis ("full", "patterns_only", "quick")
     
     Returns:
         Dictionary containing analysis results with status, patterns, and recommendations
     """
     try:
-        # Validate input files
+        # Validate test log file
         test_valid, test_msg = _log_processor.validate_file(test_log_path)
         if not test_valid:
             return {"error": f"Test log validation failed: {test_msg}"}
         
-        baseline_valid, baseline_msg = _log_processor.validate_file(baseline_log_path)
-        if not baseline_valid:
-            return {"error": f"Baseline log validation failed: {baseline_msg}"}
-        
-        # Read file contents
+        # Read test file content
         with open(test_log_path, 'r', encoding='utf-8', errors='ignore') as f:
             test_content = f.read()
         
-        with open(baseline_log_path, 'r', encoding='utf-8', errors='ignore') as f:
-            baseline_content = f.read()
-        
-        # Extract patterns from both files
+        # Extract patterns from test file
         test_patterns = _log_processor.extract_patterns(test_content)
-        baseline_patterns = _log_processor.extract_patterns(baseline_content)
         
-        # Compare with baseline
-        comparison = _log_processor.compare_with_baseline(test_content, baseline_content)
+        # Handle optional baseline
+        baseline_content = ""
+        baseline_patterns = []
+        comparison = None
+        
+        if baseline_log_path and baseline_log_path.strip():
+            # Validate baseline file if provided
+            baseline_valid, baseline_msg = _log_processor.validate_file(baseline_log_path)
+            if baseline_valid:
+                with open(baseline_log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    baseline_content = f.read()
+                
+                baseline_patterns = _log_processor.extract_patterns(baseline_content)
+                comparison = _log_processor.compare_with_baseline(test_content, baseline_content)
+            else:
+                logger.warning(f"Baseline log validation failed: {baseline_msg}. Proceeding with standalone analysis.")
+        
+        # Determine analysis mode
+        has_baseline = comparison is not None
         
         # Generate recommendations based on findings
         recommendations = []
-        if comparison['critical_deviation'] > 0:
-            recommendations.append("CRITICAL: Investigate connection timeouts and service failures immediately")
-        if comparison['warning_deviation'] > 2:
-            recommendations.append("WARNING: Multiple performance issues detected - check system resources")
-        if comparison['status'] == 'BASELINE_MATCH':
-            recommendations.append("System appears to be operating within normal parameters")
+        critical_patterns = [p for p in test_patterns if p.severity == 'CRITICAL']
+        warning_patterns = [p for p in test_patterns if p.severity == 'WARNING']
+        
+        if has_baseline:
+            # Baseline comparison recommendations
+            if comparison['critical_deviation'] > 0:
+                recommendations.append("CRITICAL: Investigate connection timeouts and service failures immediately")
+            if comparison['warning_deviation'] > 2:
+                recommendations.append("WARNING: Multiple performance issues detected - check system resources")
+            if comparison['status'] == 'BASELINE_MATCH':
+                recommendations.append("System appears to be operating within normal parameters")
+        else:
+            # Standalone analysis recommendations
+            if critical_patterns:
+                recommendations.append("CRITICAL: Critical failure patterns detected - immediate investigation required")
+            if len(warning_patterns) > 3:
+                recommendations.append("WARNING: Multiple warning patterns detected - system monitoring recommended")
+            if not test_patterns:
+                recommendations.append("INFO: No obvious failure patterns detected in log analysis")
+        
+        # Determine status and confidence
+        if has_baseline:
+            # Use comparison-based status
+            status = "FAIL" if comparison['critical_deviation'] > 0 else \
+                    "UNCERTAIN" if comparison['warning_deviation'] > 1 else "PASS"
+            confidence = 0.9 if comparison['critical_deviation'] > 0 else \
+                        0.7 if comparison['warning_deviation'] > 0 else 0.85
+            comparison_summary = f"Found {len(test_patterns)} patterns vs {len(baseline_patterns)} in baseline. Status: {comparison['status']}"
+        else:
+            # Use standalone analysis status
+            status = "FAIL" if critical_patterns else \
+                    "UNCERTAIN" if len(warning_patterns) > 2 else "PASS"
+            confidence = 0.85 if critical_patterns else \
+                        0.7 if warning_patterns else 0.8
+            comparison_summary = f"Standalone analysis: Found {len(test_patterns)} patterns ({len(critical_patterns)} critical, {len(warning_patterns)} warnings). No baseline comparison available."
         
         # Build result
         result = LogAnalysisResult(
-            status="FAIL" if comparison['critical_deviation'] > 0 else 
-                   "UNCERTAIN" if comparison['warning_deviation'] > 1 else "PASS",
-            confidence=0.9 if comparison['critical_deviation'] > 0 else 
-                      0.7 if comparison['warning_deviation'] > 0 else 0.85,
-            failure_indicators=[p.description for p in test_patterns if p.severity == 'CRITICAL'],
-            comparison_summary=f"Found {len(test_patterns)} patterns vs {len(baseline_patterns)} in baseline. "
-                             f"Status: {comparison['status']}",
+            status=status,
+            confidence=confidence,
+            failure_indicators=[p.description for p in critical_patterns],
+            comparison_summary=comparison_summary,
             recommendations=recommendations,
             processing_stats={
                 'test_file_size': len(test_content),
-                'baseline_file_size': len(baseline_content),
+                'baseline_file_size': len(baseline_content) if baseline_content else 0,
                 'patterns_detected': len(test_patterns),
+                'critical_patterns': len(critical_patterns),
+                'warning_patterns': len(warning_patterns),
+                'has_baseline': has_baseline,
                 'comparison_result': comparison
             }
         )
@@ -314,6 +352,165 @@ def analyze_logs(
     except Exception as e:
         logger.error(f"Error in analyze_logs: {str(e)}")
         return {"error": f"Analysis failed: {str(e)}"}
+
+
+@tool(
+    name="analyze_multiple_logs",
+    description="Analyze multiple log files in batch for comprehensive diagnosis across multiple instruments or time periods"
+)
+def analyze_multiple_logs(
+    log_file_paths: List[str],
+    baseline_log_path: str = "",
+    analysis_type: str = "full"
+) -> Dict[str, Any]:
+    """
+    Analyze multiple log files in batch for comprehensive diagnosis.
+    
+    Args:
+        log_file_paths: List of paths to log files to analyze
+        baseline_log_path: Optional path to gold standard log file for comparison
+        analysis_type: Type of analysis ("full", "patterns_only", "quick")
+    
+    Returns:
+        Dictionary containing aggregated analysis results across all files
+    """
+    try:
+        if not log_file_paths:
+            return {"error": "No log file paths provided"}
+        
+        all_results = []
+        aggregated_patterns = []
+        total_critical = 0
+        total_warnings = 0
+        
+        # Process each file
+        for i, log_path in enumerate(log_file_paths):
+            logger.info(f"Processing file {i+1}/{len(log_file_paths)}: {log_path}")
+            
+            # Analyze individual file
+            result = analyze_logs(log_path, baseline_log_path, analysis_type)
+            
+            if "error" not in result:
+                all_results.append({
+                    'file_path': log_path,
+                    'result': result
+                })
+                
+                # Aggregate statistics
+                stats = result.get('processing_stats', {})
+                total_critical += stats.get('critical_patterns', 0)
+                total_warnings += stats.get('warning_patterns', 0)
+        
+        if not all_results:
+            return {"error": "No files could be processed successfully"}
+        
+        # Determine overall status
+        if total_critical > 0:
+            overall_status = "FAIL"
+            confidence = 0.9
+        elif total_warnings > len(log_file_paths) * 2:  # More than 2 warnings per file
+            overall_status = "UNCERTAIN"
+            confidence = 0.7
+        else:
+            overall_status = "PASS"
+            confidence = 0.8
+        
+        # Generate summary
+        summary = f"Batch analysis of {len(log_file_paths)} files completed. "
+        summary += f"Total critical patterns: {total_critical}, Total warnings: {total_warnings}. "
+        summary += f"Overall assessment: {overall_status}"
+        
+        # Recommendations
+        recommendations = []
+        if total_critical > 0:
+            recommendations.append("CRITICAL: Multiple files show critical failure patterns - immediate investigation required")
+        if total_warnings > len(log_file_paths) * 3:
+            recommendations.append("WARNING: High warning pattern density across files - system monitoring recommended")
+        if overall_status == "PASS":
+            recommendations.append("INFO: All files show acceptable patterns - continue normal operation")
+        
+        return {
+            'overall_status': overall_status,
+            'confidence': confidence,
+            'files_processed': len(log_file_paths),
+            'total_critical_patterns': total_critical,
+            'total_warning_patterns': total_warnings,
+            'summary': summary,
+            'recommendations': recommendations,
+            'individual_results': all_results[:5],  # Limit to first 5 for brevity
+            'batch_analysis': True
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in analyze_multiple_logs: {str(e)}")
+        return {"error": f"Batch analysis failed: {str(e)}"}
+
+
+@tool(
+    name="scan_for_uploaded_files",
+    description="MANDATORY FIRST STEP: Always use this tool first to scan temp_uploads directory for available log files before any analysis"
+)
+def scan_for_uploaded_files() -> Dict[str, Any]:
+    """
+    Scan for uploaded files in the temp_uploads directory.
+    
+    Returns:
+        Dictionary containing information about available files for analysis
+    """
+    try:
+        from pathlib import Path
+        import os
+        
+        temp_dir = Path("temp_uploads")
+        
+        if not temp_dir.exists():
+            return {
+                "files_found": 0,
+                "message": "No temp_uploads directory found. Please upload log files first.",
+                "files": []
+            }
+        
+        # Find log files
+        log_files = []
+        for pattern in ["*.log", "*.txt", "*.csv"]:
+            log_files.extend(temp_dir.glob(pattern))
+        
+        if not log_files:
+            return {
+                "files_found": 0,
+                "message": "No log files found in temp_uploads directory. Please upload log files.",
+                "files": []
+            }
+        
+        # Process file information
+        file_info = []
+        for file_path in log_files:
+            try:
+                file_size = file_path.stat().st_size
+                file_info.append({
+                    "name": file_path.name,
+                    "path": str(file_path),
+                    "size_bytes": file_size,
+                    "size_mb": round(file_size / (1024 * 1024), 2),
+                    "type": "error_log" if "error" in file_path.name.lower() else "log"
+                })
+            except Exception as e:
+                logger.warning(f"Could not process file {file_path}: {e}")
+        
+        # Sort by size (largest first) and limit to most recent 10
+        file_info.sort(key=lambda x: x["size_bytes"], reverse=True)
+        file_info = file_info[:10]
+        
+        return {
+            "files_found": len(file_info),
+            "message": f"Found {len(file_info)} log files ready for analysis",
+            "files": file_info,
+            "recommended_action": f"Use analyze_logs('{file_info[0]['path']}', '') to analyze the largest file, or analyze_multiple_logs([paths]) for batch analysis"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error scanning for files: {str(e)}")
+        return {"error": f"File scan failed: {str(e)}"}
 
 
 @tool(
@@ -421,6 +618,88 @@ def process_large_files(
     except Exception as e:
         logger.error(f"Error in process_large_files: {str(e)}")
         return {"error": f"Large file processing failed: {str(e)}"}
+
+
+@tool(
+    name="analyze_log_content",
+    description="Analyze log content directly without requiring file paths - useful for uploaded file content"
+)
+def analyze_log_content(
+    test_log_content: str,
+    baseline_log_content: str = "",
+    analysis_type: str = "full"
+) -> Dict[str, Any]:
+    """
+    Analyze log content directly by comparing against baseline content.
+    
+    Args:
+        test_log_content: The log content to analyze
+        baseline_log_content: Optional baseline log content for comparison
+        analysis_type: Type of analysis ("full", "patterns_only", "quick")
+    
+    Returns:
+        Dictionary containing analysis results with status, patterns, and recommendations
+    """
+    try:
+        if not test_log_content or not test_log_content.strip():
+            return {"error": "Empty or invalid test log content provided"}
+        
+        # Extract patterns from test content
+        test_patterns = _log_processor.extract_patterns(test_log_content)
+        
+        # If baseline provided, do comparison
+        comparison = None
+        if baseline_log_content and baseline_log_content.strip():
+            comparison = _log_processor.compare_with_baseline(test_log_content, baseline_log_content)
+        
+        # Generate recommendations based on findings
+        recommendations = []
+        critical_patterns = [p for p in test_patterns if p.severity == 'CRITICAL']
+        warning_patterns = [p for p in test_patterns if p.severity == 'WARNING']
+        
+        if critical_patterns:
+            recommendations.append("CRITICAL: Investigate connection timeouts and service failures immediately")
+        if len(warning_patterns) > 2:
+            recommendations.append("WARNING: Multiple performance issues detected - check system resources")
+        if not test_patterns:
+            recommendations.append("No obvious failure patterns detected in the log content")
+        
+        # Determine status
+        if comparison:
+            status = "FAIL" if comparison['critical_deviation'] > 0 else \
+                    "UNCERTAIN" if comparison['warning_deviation'] > 1 else "PASS"
+            confidence = 0.9 if comparison['critical_deviation'] > 0 else \
+                        0.7 if comparison['warning_deviation'] > 0 else 0.85
+        else:
+            # Standalone analysis without baseline
+            status = "FAIL" if critical_patterns else \
+                    "UNCERTAIN" if len(warning_patterns) > 2 else "PASS"
+            confidence = 0.8 if critical_patterns else \
+                        0.6 if warning_patterns else 0.7
+        
+        # Build result
+        result = LogAnalysisResult(
+            status=status,
+            confidence=confidence,
+            failure_indicators=[p.description for p in critical_patterns],
+            comparison_summary=f"Found {len(test_patterns)} patterns. " + 
+                             (f"Comparison: {comparison['status']}" if comparison else "No baseline comparison"),
+            recommendations=recommendations,
+            processing_stats={
+                'content_length': len(test_log_content),
+                'baseline_length': len(baseline_log_content) if baseline_log_content else 0,
+                'patterns_detected': len(test_patterns),
+                'critical_patterns': len(critical_patterns),
+                'warning_patterns': len(warning_patterns),
+                'comparison_result': comparison
+            }
+        )
+        
+        return asdict(result)
+        
+    except Exception as e:
+        logger.error(f"Error in analyze_log_content: {str(e)}")
+        return {"error": f"Content analysis failed: {str(e)}"}
 
 
 @tool(
@@ -552,6 +831,7 @@ def _generate_indicator_recommendations(categorized: Dict, risk_score: int) -> L
 # List of available log analysis tools
 LOG_ANALYSIS_TOOLS = [
     analyze_logs,
+    analyze_log_content,
     process_large_files,
     extract_failure_indicators
 ]

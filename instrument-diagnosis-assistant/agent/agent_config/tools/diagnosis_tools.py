@@ -1,665 +1,577 @@
 """
 Diagnosis Generation Tools for Instrument Diagnosis Assistant
 
-These tools generate intelligent diagnoses using Amazon Nova Pro, providing
-pass/fail determinations, confidence scoring, and actionable recommendations.
+These tools generate comprehensive diagnoses based on S3 log analysis results,
+with confidence scoring and recommendation generation.
 """
 
 import json
-import logging
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import logging
 from strands import tool
+from .s3_storage_tools import get_storage_manager
+from .s3_log_analysis_tools import get_s3_analyzer
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class DiagnosisResult:
-    """Complete diagnosis result with recommendations"""
-    diagnosis: str  # "PASS", "FAIL", "UNCERTAIN"
-    confidence_score: float  # 0.0 to 1.0
-    severity_level: str  # "LOW", "MEDIUM", "HIGH", "CRITICAL"
-    primary_issues: List[str]
-    root_cause_analysis: str
-    recommendations: List[Dict[str, Any]]
-    technical_details: Dict[str, Any]
+    """Comprehensive diagnosis result"""
+    diagnosis_id: str
     timestamp: str
+    status: str  # "PASS", "FAIL", "UNCERTAIN"
+    confidence: float
+    severity: str  # "CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"
+    summary: str
+    failure_indicators: List[str]
+    root_causes: List[Dict[str, Any]]
+    recommendations: List[Dict[str, Any]]
+    supporting_evidence: Dict[str, Any]
+    s3_references: List[str]
 
 
-@dataclass
-class RecommendationItem:
-    """Individual recommendation with priority and details"""
-    priority: str  # "IMMEDIATE", "HIGH", "MEDIUM", "LOW"
-    category: str  # "HARDWARE", "SOFTWARE", "CONFIGURATION", "MAINTENANCE"
-    action: str
-    description: str
-    estimated_time: str
-    required_expertise: str
-    risk_if_ignored: str
-
-
-class DiagnosisEngine:
-    """Core diagnosis generation engine"""
+class DiagnosisGenerator:
+    """Generates comprehensive diagnoses from log analysis results"""
     
     def __init__(self):
-        # Diagnosis criteria and thresholds
-        self.diagnosis_criteria = {
-            'pass_thresholds': {
-                'max_critical_issues': 0,
-                'max_warning_issues': 2,
-                'min_confidence': 0.7
-            },
-            'fail_thresholds': {
-                'critical_issues': 1,
-                'warning_issues': 5,
-                'risk_score': 70
-            },
-            'uncertain_conditions': {
-                'low_confidence': 0.5,
-                'mixed_signals': True,
-                'insufficient_data': True
-            }
-        }
-        
-        # Issue severity mapping
-        self.severity_mapping = {
-            'connection_timeout': 'CRITICAL',
-            'service_failures': 'CRITICAL', 
-            'memory_issues': 'HIGH',
-            'disk_issues': 'MEDIUM',
-            'performance_degradation': 'MEDIUM',
-            'driver_issues': 'MEDIUM'
-        }
-        
-        # Recommendation templates
-        self.recommendation_templates = {
-            'connection_timeout': {
-                'priority': 'IMMEDIATE',
-                'category': 'HARDWARE',
-                'action': 'Check and replace connection cables',
-                'description': 'Connection timeouts indicate hardware connectivity issues',
-                'estimated_time': '15-30 minutes',
-                'required_expertise': 'Technician Level 1',
-                'risk_if_ignored': 'System will remain non-functional'
-            },
-            'service_failures': {
-                'priority': 'IMMEDIATE',
-                'category': 'SOFTWARE',
-                'action': 'Restart failed services and check dependencies',
-                'description': 'Critical services have failed to start or crashed',
-                'estimated_time': '10-20 minutes',
-                'required_expertise': 'Technician Level 2',
-                'risk_if_ignored': 'Complete system failure'
-            },
-            'memory_issues': {
-                'priority': 'HIGH',
-                'category': 'HARDWARE',
-                'action': 'Monitor memory usage and restart system if needed',
-                'description': 'Memory leaks or insufficient memory detected',
-                'estimated_time': '5-15 minutes',
-                'required_expertise': 'Technician Level 1',
-                'risk_if_ignored': 'System instability and crashes'
-            },
-            'disk_issues': {
-                'priority': 'MEDIUM',
-                'category': 'MAINTENANCE',
-                'action': 'Free up disk space and check disk health',
-                'description': 'Disk space or write errors detected',
-                'estimated_time': '20-45 minutes',
-                'required_expertise': 'Technician Level 1',
-                'risk_if_ignored': 'Data loss and system failures'
-            },
-            'performance_degradation': {
-                'priority': 'MEDIUM',
-                'category': 'CONFIGURATION',
-                'action': 'Optimize system settings and check background processes',
-                'description': 'System performance is below optimal levels',
-                'estimated_time': '30-60 minutes',
-                'required_expertise': 'Technician Level 2',
-                'risk_if_ignored': 'Reduced efficiency and potential failures'
-            },
-            'driver_issues': {
-                'priority': 'HIGH',
-                'category': 'SOFTWARE',
-                'action': 'Update drivers to latest compatible versions',
-                'description': 'Outdated or incompatible drivers detected',
-                'estimated_time': '15-30 minutes',
-                'required_expertise': 'Technician Level 2',
-                'risk_if_ignored': 'Hardware compatibility issues'
-            }
+        self.confidence_thresholds = {
+            'high': 0.85,
+            'medium': 0.70,
+            'low': 0.50
         }
     
-    def calculate_confidence_score(self, analysis_data: Dict[str, Any]) -> float:
-        """Calculate confidence score based on analysis quality and consistency"""
-        base_confidence = 0.5
+    def generate_diagnosis(
+        self,
+        analysis_results: Dict[str, Any],
+        session_id: str,
+        additional_context: str = ""
+    ) -> DiagnosisResult:
+        """
+        Generate comprehensive diagnosis from analysis results.
         
-        # Boost confidence for clear patterns
-        if 'analysis_summary' in analysis_data:
-            summary = analysis_data['analysis_summary']
-            critical_count = summary.get('critical_patterns', 0)
-            warning_count = summary.get('warning_patterns', 0)
-            
-            # Clear failure indicators boost confidence
-            if critical_count > 0:
-                base_confidence += 0.3
-            elif warning_count > 3:
-                base_confidence += 0.2
-            elif warning_count == 0:
-                base_confidence += 0.25  # Clear pass also boosts confidence
+        Args:
+            analysis_results: Results from log analysis
+            session_id: Session identifier
+            additional_context: Additional context for diagnosis
         
-        # Boost for consistent patterns across chunks
-        if 'chunk_details' in analysis_data:
-            chunks = analysis_data['chunk_details']
-            if len(chunks) > 1:
-                # Check consistency across chunks
-                critical_counts = [chunk.get('critical_patterns', 0) for chunk in chunks]
-                if all(count > 0 for count in critical_counts) or all(count == 0 for count in critical_counts):
-                    base_confidence += 0.1  # Consistent pattern across chunks
+        Returns:
+            DiagnosisResult object
+        """
+        # Generate unique diagnosis ID
+        diagnosis_id = f"DIAG-{session_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         
-        # Reduce confidence for edge cases
-        if 'comparison_result' in analysis_data:
-            comp = analysis_data['comparison_result']
-            if comp.get('status') == 'UNCERTAIN':
-                base_confidence -= 0.2
+        # Extract key information from analysis
+        status = analysis_results.get('status', 'UNCERTAIN')
+        confidence = analysis_results.get('confidence', 0.5)
         
-        return min(1.0, max(0.1, base_confidence))
+        # Determine severity
+        severity = self._determine_severity(analysis_results)
+        
+        # Extract failure indicators
+        failure_indicators = self._extract_failure_indicators(analysis_results)
+        
+        # Identify root causes
+        root_causes = self._identify_root_causes(analysis_results)
+        
+        # Generate recommendations
+        recommendations = self._generate_recommendations(
+            status, severity, root_causes, analysis_results
+        )
+        
+        # Create summary
+        summary = self._create_summary(
+            status, severity, failure_indicators, root_causes
+        )
+        
+        # Collect supporting evidence
+        supporting_evidence = self._collect_evidence(analysis_results)
+        
+        # Extract S3 references
+        s3_references = self._extract_s3_references(analysis_results)
+        
+        diagnosis = DiagnosisResult(
+            diagnosis_id=diagnosis_id,
+            timestamp=datetime.utcnow().isoformat(),
+            status=status,
+            confidence=confidence,
+            severity=severity,
+            summary=summary,
+            failure_indicators=failure_indicators,
+            root_causes=root_causes,
+            recommendations=recommendations,
+            supporting_evidence=supporting_evidence,
+            s3_references=s3_references
+        )
+        
+        return diagnosis
     
-    def determine_diagnosis(self, analysis_data: Dict[str, Any]) -> str:
-        """Determine primary diagnosis based on analysis data"""
-        # Extract key metrics
-        critical_issues = 0
-        warning_issues = 0
-        risk_score = 0
+    def _determine_severity(self, analysis_results: Dict[str, Any]) -> str:
+        """Determine severity level from analysis results"""
+        patterns = analysis_results.get('patterns', {})
+        summary = analysis_results.get('summary', {})
         
-        if 'analysis_summary' in analysis_data:
-            summary = analysis_data['analysis_summary']
-            critical_issues = summary.get('critical_patterns', 0)
-            warning_issues = summary.get('warning_patterns', 0)
+        critical_patterns = patterns.get('critical', 0)
+        error_count = summary.get('error_count', 0)
+        critical_events = len(summary.get('critical_events', []))
         
-        if 'summary' in analysis_data:
-            summary = analysis_data['summary']
-            risk_score = summary.get('risk_score', 0)
-        
-        # Apply diagnosis criteria
-        if critical_issues >= self.diagnosis_criteria['fail_thresholds']['critical_issues']:
-            return "FAIL"
-        elif risk_score >= self.diagnosis_criteria['fail_thresholds']['risk_score']:
-            return "FAIL"
-        elif warning_issues >= self.diagnosis_criteria['fail_thresholds']['warning_issues']:
-            return "FAIL"
-        elif critical_issues == 0 and warning_issues <= self.diagnosis_criteria['pass_thresholds']['max_warning_issues']:
-            return "PASS"
+        if critical_patterns > 0 or critical_events > 0:
+            return 'CRITICAL'
+        elif error_count > 50:
+            return 'HIGH'
+        elif error_count > 20 or patterns.get('warnings', 0) > 50:
+            return 'MEDIUM'
+        elif error_count > 0 or patterns.get('warnings', 0) > 0:
+            return 'LOW'
         else:
-            return "UNCERTAIN"
+            return 'NONE'
     
-    def determine_severity_level(self, analysis_data: Dict[str, Any]) -> str:
-        """Determine overall severity level"""
-        critical_issues = 0
-        warning_issues = 0
-        risk_score = 0
+    def _extract_failure_indicators(self, analysis_results: Dict[str, Any]) -> List[str]:
+        """Extract failure indicators from analysis results"""
+        indicators = []
         
-        if 'analysis_summary' in analysis_data:
-            summary = analysis_data['analysis_summary']
-            critical_issues = summary.get('critical_patterns', 0)
-            warning_issues = summary.get('warning_patterns', 0)
+        # From patterns
+        patterns = analysis_results.get('patterns', {})
+        pattern_details = patterns.get('details', [])
         
-        if 'summary' in analysis_data:
-            summary = analysis_data['summary']
-            risk_score = summary.get('risk_score', 0)
+        for pattern in pattern_details:
+            if pattern.get('severity') == 'CRITICAL':
+                indicators.append(pattern.get('description', 'Unknown critical issue'))
         
-        if critical_issues > 2 or risk_score > 80:
-            return "CRITICAL"
-        elif critical_issues > 0 or risk_score > 50:
-            return "HIGH"
-        elif warning_issues > 3 or risk_score > 25:
-            return "MEDIUM"
-        else:
-            return "LOW"
+        # From summary
+        summary = analysis_results.get('summary', {})
+        critical_events = summary.get('critical_events', [])
+        
+        for event in critical_events[:5]:  # Limit to 5
+            indicators.append(f"Critical event: {event}")
+        
+        return indicators
     
-    def extract_primary_issues(self, analysis_data: Dict[str, Any]) -> List[str]:
-        """Extract primary issues from analysis data"""
-        issues = []
-        
-        # From top issues
-        if 'top_issues' in analysis_data:
-            for issue in analysis_data['top_issues'][:5]:  # Top 5 issues
-                issues.append(f"{issue['severity']}: {issue['description']}")
-        
-        # From categorized indicators
-        if 'categorized_indicators' in analysis_data:
-            categories = analysis_data['categorized_indicators']
-            for category, indicators in categories.items():
-                if indicators and category in ['critical_failures', 'connection_problems']:
-                    for indicator in indicators[:2]:  # Top 2 per critical category
-                        issues.append(f"{indicator['description']}")
-        
-        return issues[:10]  # Limit to top 10 issues
-    
-    def generate_recommendations(self, analysis_data: Dict[str, Any], diagnosis: str) -> List[Dict[str, Any]]:
-        """Generate actionable recommendations based on analysis"""
-        recommendations = []
-        
-        # Get pattern types from analysis
-        pattern_types = set()
-        if 'analysis_summary' in analysis_data:
-            pattern_types.update(analysis_data['analysis_summary'].get('pattern_types', []))
-        
-        if 'top_issues' in analysis_data:
-            for issue in analysis_data['top_issues']:
-                pattern_types.add(issue.get('type', ''))
-        
-        # Generate specific recommendations for each pattern type
-        for pattern_type in pattern_types:
-            if pattern_type in self.recommendation_templates:
-                template = self.recommendation_templates[pattern_type]
-                recommendations.append({
-                    'id': f"rec_{pattern_type}",
-                    'priority': template['priority'],
-                    'category': template['category'],
-                    'action': template['action'],
-                    'description': template['description'],
-                    'estimated_time': template['estimated_time'],
-                    'required_expertise': template['required_expertise'],
-                    'risk_if_ignored': template['risk_if_ignored']
-                })
-        
-        # Add general recommendations based on diagnosis
-        if diagnosis == "FAIL":
-            recommendations.append({
-                'id': 'rec_general_fail',
-                'priority': 'IMMEDIATE',
-                'category': 'GENERAL',
-                'action': 'Do not use instrument until issues are resolved',
-                'description': 'Critical failures detected - instrument is not safe to operate',
-                'estimated_time': 'Until repairs complete',
-                'required_expertise': 'Qualified Technician',
-                'risk_if_ignored': 'Equipment damage, safety hazards, invalid results'
-            })
-        elif diagnosis == "UNCERTAIN":
-            recommendations.append({
-                'id': 'rec_general_uncertain',
-                'priority': 'HIGH',
-                'category': 'GENERAL',
-                'action': 'Perform additional diagnostics and monitoring',
-                'description': 'Unclear system status requires further investigation',
-                'estimated_time': '30-60 minutes',
-                'required_expertise': 'Technician Level 2',
-                'risk_if_ignored': 'Potential undetected failures'
-            })
-        elif diagnosis == "PASS":
-            recommendations.append({
-                'id': 'rec_general_pass',
-                'priority': 'LOW',
-                'category': 'MAINTENANCE',
-                'action': 'Continue normal operation with routine monitoring',
-                'description': 'System appears healthy - maintain regular maintenance schedule',
-                'estimated_time': 'Ongoing',
-                'required_expertise': 'Operator',
-                'risk_if_ignored': 'Minimal - continue monitoring'
-            })
-        
-        # Sort by priority
-        priority_order = {'IMMEDIATE': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
-        recommendations.sort(key=lambda x: priority_order.get(x['priority'], 4))
-        
-        return recommendations[:10]  # Limit to top 10 recommendations
-    
-    def generate_root_cause_analysis(self, analysis_data: Dict[str, Any], diagnosis: str) -> str:
-        """Generate root cause analysis narrative"""
-        if diagnosis == "PASS":
-            return ("System analysis indicates normal operation. All critical systems are functioning "
-                   "within expected parameters. Minor warnings, if any, are within acceptable limits "
-                   "and do not indicate systemic issues.")
-        
-        # Analyze patterns for root cause
+    def _identify_root_causes(self, analysis_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Identify potential root causes from analysis results"""
         root_causes = []
         
-        if 'top_issues' in analysis_data:
-            critical_issues = [issue for issue in analysis_data['top_issues'] 
-                             if issue.get('severity') == 'CRITICAL']
-            
-            if any('connection' in issue.get('type', '') for issue in critical_issues):
-                root_causes.append("Hardware connectivity failures are preventing proper communication")
-            
-            if any('service' in issue.get('type', '') for issue in critical_issues):
-                root_causes.append("Critical software services are failing to start or maintain operation")
-            
-            if any('memory' in issue.get('type', '') for issue in critical_issues):
-                root_causes.append("Memory management issues are causing system instability")
+        patterns = analysis_results.get('patterns', {})
+        pattern_details = patterns.get('details', [])
         
-        if not root_causes:
-            if diagnosis == "FAIL":
-                root_causes.append("Multiple system degradations have accumulated to cause overall failure")
-            else:
-                root_causes.append("System status is unclear due to mixed or insufficient diagnostic signals")
+        # Group patterns by type to identify root causes
+        pattern_types = {}
+        for pattern in pattern_details:
+            ptype = pattern.get('type', 'unknown')
+            if ptype not in pattern_types:
+                pattern_types[ptype] = []
+            pattern_types[ptype].append(pattern)
         
-        return ". ".join(root_causes) + "."
+        # Analyze pattern groups
+        for ptype, plist in pattern_types.items():
+            if len(plist) > 0:
+                # Calculate aggregate confidence
+                avg_confidence = sum(p.get('confidence', 0) for p in plist) / len(plist)
+                
+                root_cause = {
+                    'category': ptype,
+                    'description': plist[0].get('description', 'Unknown issue'),
+                    'confidence': round(avg_confidence, 2),
+                    'occurrence_count': len(plist),
+                    'severity': plist[0].get('severity', 'UNKNOWN'),
+                    'evidence': [p.get('sample_lines', [])[:2] for p in plist[:3]]  # First 2 lines from first 3 patterns
+                }
+                root_causes.append(root_cause)
+        
+        # Sort by severity and confidence
+        severity_order = {'CRITICAL': 0, 'WARNING': 1, 'INFO': 2}
+        root_causes.sort(
+            key=lambda x: (severity_order.get(x['severity'], 3), -x['confidence'])
+        )
+        
+        return root_causes[:10]  # Limit to top 10
+    
+    def _generate_recommendations(
+        self,
+        status: str,
+        severity: str,
+        root_causes: List[Dict[str, Any]],
+        analysis_results: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generate actionable recommendations"""
+        recommendations = []
+        
+        # Priority recommendations based on severity
+        if severity == 'CRITICAL':
+            recommendations.append({
+                'priority': 'URGENT',
+                'action': 'Immediate Investigation Required',
+                'description': 'Critical system failures detected. Stop operations and investigate immediately.',
+                'estimated_time': 'Immediate'
+            })
+        
+        # Recommendations based on root causes
+        for cause in root_causes[:5]:  # Top 5 causes
+            category = cause['category']
+            
+            if category == 'connection_timeout':
+                recommendations.append({
+                    'priority': 'HIGH',
+                    'action': 'Check Network and USB Connections',
+                    'description': 'Verify all physical connections, network cables, and USB ports. Test connectivity.',
+                    'estimated_time': '15-30 minutes'
+                })
+            elif category == 'memory_issues':
+                recommendations.append({
+                    'priority': 'HIGH',
+                    'action': 'Monitor System Resources',
+                    'description': 'Check available memory, close unnecessary applications, consider system restart.',
+                    'estimated_time': '10-20 minutes'
+                })
+            elif category == 'disk_issues':
+                recommendations.append({
+                    'priority': 'MEDIUM',
+                    'action': 'Check Disk Space',
+                    'description': 'Verify available disk space, clean up temporary files, check disk health.',
+                    'estimated_time': '20-30 minutes'
+                })
+            elif category == 'service_failures':
+                recommendations.append({
+                    'priority': 'HIGH',
+                    'action': 'Restart Services',
+                    'description': 'Restart affected services or perform system reboot. Check service logs.',
+                    'estimated_time': '10-15 minutes'
+                })
+            elif category == 'performance_degradation':
+                recommendations.append({
+                    'priority': 'MEDIUM',
+                    'action': 'Performance Optimization',
+                    'description': 'Monitor system performance, check for resource-intensive processes, optimize settings.',
+                    'estimated_time': '30-60 minutes'
+                })
+            elif category == 'driver_issues':
+                recommendations.append({
+                    'priority': 'MEDIUM',
+                    'action': 'Update Drivers',
+                    'description': 'Check for driver updates, verify driver compatibility, reinstall if necessary.',
+                    'estimated_time': '30-45 minutes'
+                })
+        
+        # General recommendations based on status
+        if status == 'PASS':
+            recommendations.append({
+                'priority': 'LOW',
+                'action': 'Continue Monitoring',
+                'description': 'System appears healthy. Continue normal operations with routine monitoring.',
+                'estimated_time': 'Ongoing'
+            })
+        elif status == 'UNCERTAIN':
+            recommendations.append({
+                'priority': 'MEDIUM',
+                'action': 'Enhanced Monitoring',
+                'description': 'Some issues detected. Increase monitoring frequency and watch for pattern changes.',
+                'estimated_time': 'Ongoing'
+            })
+        
+        # Remove duplicates and limit
+        seen = set()
+        unique_recommendations = []
+        for rec in recommendations:
+            key = rec['action']
+            if key not in seen:
+                seen.add(key)
+                unique_recommendations.append(rec)
+        
+        return unique_recommendations[:8]  # Limit to 8 recommendations
+    
+    def _create_summary(
+        self,
+        status: str,
+        severity: str,
+        failure_indicators: List[str],
+        root_causes: List[Dict[str, Any]]
+    ) -> str:
+        """Create human-readable summary"""
+        summary_parts = []
+        
+        # Status summary
+        if status == 'FAIL':
+            summary_parts.append("DIAGNOSIS: System failure detected.")
+        elif status == 'UNCERTAIN':
+            summary_parts.append("DIAGNOSIS: Potential issues detected requiring investigation.")
+        else:
+            summary_parts.append("DIAGNOSIS: System appears to be operating normally.")
+        
+        # Severity
+        summary_parts.append(f"Severity: {severity}.")
+        
+        # Failure indicators
+        if failure_indicators:
+            summary_parts.append(f"Detected {len(failure_indicators)} failure indicator(s).")
+        
+        # Root causes
+        if root_causes:
+            top_causes = [rc['category'].replace('_', ' ').title() for rc in root_causes[:3]]
+            summary_parts.append(f"Primary concerns: {', '.join(top_causes)}.")
+        
+        return " ".join(summary_parts)
+    
+    def _collect_evidence(self, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect supporting evidence from analysis"""
+        evidence = {
+            'log_statistics': {},
+            'pattern_summary': {},
+            'critical_events': []
+        }
+        
+        # Log statistics
+        summary = analysis_results.get('summary', {})
+        evidence['log_statistics'] = {
+            'total_lines': summary.get('total_lines', 0),
+            'error_count': summary.get('error_count', 0),
+            'warning_count': summary.get('warning_count', 0),
+            'timestamp_range': summary.get('timestamp_range')
+        }
+        
+        # Pattern summary
+        patterns = analysis_results.get('patterns', {})
+        evidence['pattern_summary'] = {
+            'total_patterns': patterns.get('total', 0),
+            'critical_patterns': patterns.get('critical', 0),
+            'warning_patterns': patterns.get('warnings', 0)
+        }
+        
+        # Critical events
+        evidence['critical_events'] = summary.get('critical_events', [])[:10]
+        
+        return evidence
+    
+    def _extract_s3_references(self, analysis_results: Dict[str, Any]) -> List[str]:
+        """Extract S3 references from analysis results"""
+        references = []
+        
+        # From main result
+        if 's3_uri' in analysis_results:
+            references.append(analysis_results['s3_uri'])
+        
+        # From summary
+        summary = analysis_results.get('summary', {})
+        if 's3_uri' in summary:
+            references.append(summary['s3_uri'])
+        
+        # From comparison results
+        if 'test_file' in analysis_results:
+            test_file = analysis_results['test_file']
+            if 's3_key' in test_file:
+                references.append(f"Test: {test_file['s3_key']}")
+        
+        if 'baseline_file' in analysis_results:
+            baseline_file = analysis_results['baseline_file']
+            if 's3_key' in baseline_file:
+                references.append(f"Baseline: {baseline_file['s3_key']}")
+        
+        return list(set(references))  # Remove duplicates
+    
+    def save_diagnosis_to_s3(
+        self,
+        diagnosis: DiagnosisResult,
+        session_id: str
+    ) -> str:
+        """
+        Save diagnosis result to S3 for audit trail.
+        
+        Args:
+            diagnosis: DiagnosisResult object
+            session_id: Session identifier
+        
+        Returns:
+            S3 URI of saved diagnosis
+        """
+        try:
+            storage_manager = get_storage_manager()
+            
+            # Convert diagnosis to JSON
+            diagnosis_json = json.dumps(asdict(diagnosis), indent=2)
+            
+            # Generate S3 key
+            s3_key = f"sessions/{session_id}/analysis/diagnosis_{diagnosis.diagnosis_id}.json"
+            
+            # Save to S3
+            storage_manager.s3_client.put_object(
+                Bucket=storage_manager.bucket_name,
+                Key=s3_key,
+                Body=diagnosis_json.encode('utf-8'),
+                ContentType='application/json',
+                ServerSideEncryption='AES256',
+                Metadata={
+                    'diagnosis-id': diagnosis.diagnosis_id,
+                    'session-id': session_id,
+                    'status': diagnosis.status,
+                    'severity': diagnosis.severity,
+                    'timestamp': diagnosis.timestamp
+                }
+            )
+            
+            s3_uri = f"s3://{storage_manager.bucket_name}/{s3_key}"
+            logger.info(f"Saved diagnosis to {s3_uri}")
+            
+            return s3_uri
+            
+        except Exception as e:
+            logger.error(f"Error saving diagnosis to S3: {str(e)}")
+            raise
 
 
-# Initialize global diagnosis engine
-_diagnosis_engine = DiagnosisEngine()
+# Global diagnosis generator instance
+_diagnosis_generator = None
+
+
+def get_diagnosis_generator() -> DiagnosisGenerator:
+    """Get or create global diagnosis generator instance"""
+    global _diagnosis_generator
+    if _diagnosis_generator is None:
+        _diagnosis_generator = DiagnosisGenerator()
+    return _diagnosis_generator
 
 
 @tool(
     name="generate_diagnosis",
-    description="Generate comprehensive pass/fail diagnosis with confidence scoring and recommendations using Nova Pro intelligence"
+    description="Generate comprehensive diagnosis from S3 log analysis results with confidence scoring, root cause analysis, and actionable recommendations."
 )
 def generate_diagnosis(
-    analysis_data: Dict[str, Any],
-    context_info: Optional[Dict[str, Any]] = None,
-    diagnosis_mode: str = "comprehensive"
+    s3_uri: str = "",
+    s3_key: str = "",
+    session_id: str = "",
+    baseline_s3_uri: str = "",
+    baseline_s3_key: str = "",
+    additional_context: str = ""
 ) -> Dict[str, Any]:
     """
-    Generate intelligent diagnosis based on log analysis data using Nova Pro reasoning.
+    Generate comprehensive diagnosis from S3-stored log analysis.
     
     Args:
-        analysis_data: Results from log analysis tools (analyze_logs, process_large_files, etc.)
-        context_info: Additional context about the instrument or test conditions
-        diagnosis_mode: Mode of diagnosis ("comprehensive", "quick", "detailed")
+        s3_uri: S3 URI of log file to diagnose - provide either this or s3_key
+        s3_key: S3 key of log file to diagnose - provide either this or s3_uri
+        session_id: Session identifier for organizing results
+        baseline_s3_uri: Optional baseline S3 URI for comparison
+        baseline_s3_key: Optional baseline S3 key for comparison
+        additional_context: Additional context to inform diagnosis
     
     Returns:
-        Dictionary containing complete diagnosis with recommendations and technical details
+        Dictionary containing comprehensive diagnosis with recommendations
     """
     try:
-        if not analysis_data or 'error' in analysis_data:
-            return {"error": "Invalid or missing analysis data for diagnosis generation"}
+        # Parse S3 URI if provided
+        if s3_uri:
+            if not s3_uri.startswith('s3://'):
+                return {'error': 'Invalid S3 URI format. Must start with s3://'}
+            parts = s3_uri.replace('s3://', '').split('/', 1)
+            if len(parts) != 2:
+                return {'error': 'Invalid S3 URI format'}
+            s3_key = parts[1]
         
-        # Generate core diagnosis components
-        diagnosis = _diagnosis_engine.determine_diagnosis(analysis_data)
-        confidence_score = _diagnosis_engine.calculate_confidence_score(analysis_data)
-        severity_level = _diagnosis_engine.determine_severity_level(analysis_data)
-        primary_issues = _diagnosis_engine.extract_primary_issues(analysis_data)
-        root_cause_analysis = _diagnosis_engine.generate_root_cause_analysis(analysis_data, diagnosis)
-        recommendations = _diagnosis_engine.generate_recommendations(analysis_data, diagnosis)
+        if not s3_key:
+            return {'error': 'Either s3_uri or s3_key must be provided'}
         
-        # Compile technical details
-        technical_details = {
-            'analysis_source': analysis_data.get('file_info', {}),
-            'pattern_analysis': analysis_data.get('analysis_summary', {}),
-            'risk_assessment': analysis_data.get('summary', {}),
-            'processing_stats': analysis_data.get('processing_stats', {}),
-            'diagnosis_criteria_applied': _diagnosis_engine.diagnosis_criteria,
-            'confidence_factors': {
-                'base_analysis_quality': 'High' if confidence_score > 0.7 else 'Medium' if confidence_score > 0.5 else 'Low',
-                'pattern_consistency': 'Good' if 'chunk_details' in analysis_data else 'Limited',
-                'data_completeness': 'Complete' if analysis_data.get('total_patterns', 0) > 0 else 'Partial'
-            }
-        }
+        if not session_id:
+            # Generate session ID from S3 key if not provided
+            session_id = s3_key.split('/')[1] if '/' in s3_key else 'default'
         
-        # Add context information if provided
-        if context_info:
-            technical_details['context'] = context_info
+        # Analyze log file
+        analyzer = get_s3_analyzer()
         
-        # Create final diagnosis result
-        result = DiagnosisResult(
-            diagnosis=diagnosis,
-            confidence_score=round(confidence_score, 3),
-            severity_level=severity_level,
-            primary_issues=primary_issues,
-            root_cause_analysis=root_cause_analysis,
-            recommendations=recommendations,
-            technical_details=technical_details,
-            timestamp=datetime.now().isoformat()
+        if baseline_s3_uri or baseline_s3_key:
+            # Parse baseline URI if provided
+            if baseline_s3_uri:
+                parts = baseline_s3_uri.replace('s3://', '').split('/', 1)
+                baseline_s3_key = parts[1] if len(parts) == 2 else baseline_s3_key
+            
+            # Compare with baseline
+            analysis_results = analyzer.compare_s3_logs(s3_key, baseline_s3_key)
+        else:
+            # Standalone analysis
+            analysis_results = analyzer.analyze_with_streaming(s3_key)
+        
+        # Generate diagnosis
+        generator = get_diagnosis_generator()
+        diagnosis = generator.generate_diagnosis(
+            analysis_results,
+            session_id,
+            additional_context
         )
         
-        return asdict(result)
+        # Save diagnosis to S3
+        try:
+            diagnosis_s3_uri = generator.save_diagnosis_to_s3(diagnosis, session_id)
+            diagnosis_saved = True
+        except Exception as e:
+            logger.warning(f"Could not save diagnosis to S3: {e}")
+            diagnosis_s3_uri = None
+            diagnosis_saved = False
+        
+        # Convert to dictionary
+        result = asdict(diagnosis)
+        result['success'] = True
+        result['diagnosis_saved_to_s3'] = diagnosis_saved
+        if diagnosis_s3_uri:
+            result['diagnosis_s3_uri'] = diagnosis_s3_uri
+        
+        return result
         
     except Exception as e:
         logger.error(f"Error in generate_diagnosis: {str(e)}")
-        return {"error": f"Diagnosis generation failed: {str(e)}"}
+        return {'error': f'Diagnosis generation failed: {str(e)}'}
 
 
 @tool(
-    name="calculate_confidence_score",
-    description="Calculate confidence score for diagnosis based on analysis quality and data consistency"
+    name="get_diagnosis_from_s3",
+    description="Retrieve a previously generated diagnosis from S3 storage by diagnosis ID or S3 URI."
 )
-def calculate_confidence_score(
-    analysis_results: List[Dict[str, Any]],
-    cross_validation: bool = True
+def get_diagnosis_from_s3(
+    diagnosis_id: str = "",
+    session_id: str = "",
+    diagnosis_s3_uri: str = ""
 ) -> Dict[str, Any]:
     """
-    Calculate overall confidence score by analyzing multiple analysis results.
+    Retrieve diagnosis from S3 storage.
     
     Args:
-        analysis_results: List of analysis results from different tools or sources
-        cross_validation: Whether to perform cross-validation between results
+        diagnosis_id: Diagnosis ID to retrieve
+        session_id: Session ID (required if using diagnosis_id)
+        diagnosis_s3_uri: Direct S3 URI to diagnosis file
     
     Returns:
-        Dictionary containing confidence metrics and validation results
+        Dictionary containing diagnosis information
     """
     try:
-        if not analysis_results:
-            return {"error": "No analysis results provided for confidence calculation"}
+        storage_manager = get_storage_manager()
         
-        individual_scores = []
-        consistency_metrics = []
+        # Determine S3 key
+        if diagnosis_s3_uri:
+            if not diagnosis_s3_uri.startswith('s3://'):
+                return {'error': 'Invalid S3 URI format'}
+            parts = diagnosis_s3_uri.replace('s3://', '').split('/', 1)
+            if len(parts) != 2:
+                return {'error': 'Invalid S3 URI format'}
+            s3_key = parts[1]
+        elif diagnosis_id and session_id:
+            s3_key = f"sessions/{session_id}/analysis/diagnosis_{diagnosis_id}.json"
+        else:
+            return {'error': 'Either diagnosis_s3_uri or both diagnosis_id and session_id must be provided'}
         
-        # Calculate individual confidence scores
-        for result in analysis_results:
-            if 'error' not in result:
-                score = _diagnosis_engine.calculate_confidence_score(result)
-                individual_scores.append(score)
+        # Retrieve from S3
+        content = storage_manager.stream_file_content(s3_key)
+        diagnosis_data = json.loads(content)
         
-        if not individual_scores:
-            return {"error": "No valid analysis results for confidence calculation"}
+        diagnosis_data['success'] = True
+        diagnosis_data['retrieved_from'] = f"s3://{storage_manager.bucket_name}/{s3_key}"
         
-        # Cross-validation if multiple results
-        if cross_validation and len(analysis_results) > 1:
-            # Check consistency of diagnoses
-            diagnoses = []
-            for result in analysis_results:
-                if 'status' in result:
-                    diagnoses.append(result['status'])
-                elif 'diagnosis' in result:
-                    diagnoses.append(result['diagnosis'])
-            
-            # Calculate consistency score
-            if diagnoses:
-                most_common = max(set(diagnoses), key=diagnoses.count)
-                consistency_ratio = diagnoses.count(most_common) / len(diagnoses)
-                consistency_metrics.append({
-                    'metric': 'diagnosis_consistency',
-                    'score': consistency_ratio,
-                    'description': f"{consistency_ratio:.1%} of analyses agree on diagnosis"
-                })
-        
-        # Calculate overall confidence
-        base_confidence = sum(individual_scores) / len(individual_scores)
-        
-        # Apply consistency adjustments
-        consistency_adjustment = 0
-        if consistency_metrics:
-            avg_consistency = sum(m['score'] for m in consistency_metrics) / len(consistency_metrics)
-            if avg_consistency > 0.8:
-                consistency_adjustment = 0.1  # Boost for high consistency
-            elif avg_consistency < 0.5:
-                consistency_adjustment = -0.2  # Penalty for low consistency
-        
-        final_confidence = min(1.0, max(0.1, base_confidence + consistency_adjustment))
-        
-        result = {
-            'overall_confidence': round(final_confidence, 3),
-            'confidence_level': 'HIGH' if final_confidence > 0.8 else 'MEDIUM' if final_confidence > 0.6 else 'LOW',
-            'individual_scores': [round(score, 3) for score in individual_scores],
-            'consistency_metrics': consistency_metrics,
-            'confidence_factors': {
-                'number_of_analyses': len(analysis_results),
-                'average_individual_confidence': round(base_confidence, 3),
-                'consistency_adjustment': round(consistency_adjustment, 3),
-                'cross_validation_performed': cross_validation and len(analysis_results) > 1
-            },
-            'recommendations': _generate_confidence_recommendations(final_confidence, consistency_metrics)
-        }
-        
-        return result
+        return diagnosis_data
         
     except Exception as e:
-        logger.error(f"Error in calculate_confidence_score: {str(e)}")
-        return {"error": f"Confidence calculation failed: {str(e)}"}
+        logger.error(f"Error in get_diagnosis_from_s3: {str(e)}")
+        return {'error': f'Failed to retrieve diagnosis: {str(e)}'}
 
 
-def _generate_confidence_recommendations(confidence: float, consistency_metrics: List[Dict]) -> List[str]:
-    """Generate recommendations based on confidence analysis"""
-    recommendations = []
-    
-    if confidence > 0.8:
-        recommendations.append("High confidence diagnosis - results are reliable for decision making")
-    elif confidence > 0.6:
-        recommendations.append("Medium confidence - consider additional validation if critical decisions depend on results")
-    else:
-        recommendations.append("Low confidence - perform additional diagnostics before making critical decisions")
-    
-    if consistency_metrics:
-        avg_consistency = sum(m['score'] for m in consistency_metrics) / len(consistency_metrics)
-        if avg_consistency < 0.7:
-            recommendations.append("Inconsistent results detected - review analysis parameters and data quality")
-    
-    return recommendations
-
-
-@tool(
-    name="generate_recommendations",
-    description="Generate prioritized, actionable recommendations based on diagnosis results"
-)
-def generate_recommendations(
-    diagnosis_result: Dict[str, Any],
-    user_expertise_level: str = "technician_level_1",
-    available_resources: List[str] = None
-) -> Dict[str, Any]:
-    """
-    Generate detailed, prioritized recommendations tailored to user expertise and available resources.
-    
-    Args:
-        diagnosis_result: Result from generate_diagnosis tool
-        user_expertise_level: User's technical expertise ("operator", "technician_level_1", "technician_level_2", "engineer")
-        available_resources: List of available resources/tools
-    
-    Returns:
-        Dictionary containing prioritized recommendations with implementation details
-    """
-    try:
-        if 'error' in diagnosis_result:
-            return {"error": "Invalid diagnosis result provided"}
-        
-        base_recommendations = diagnosis_result.get('recommendations', [])
-        diagnosis = diagnosis_result.get('diagnosis', 'UNCERTAIN')
-        severity = diagnosis_result.get('severity_level', 'MEDIUM')
-        
-        # Filter recommendations based on expertise level
-        expertise_mapping = {
-            'operator': ['GENERAL', 'MAINTENANCE'],
-            'technician_level_1': ['GENERAL', 'MAINTENANCE', 'HARDWARE'],
-            'technician_level_2': ['GENERAL', 'MAINTENANCE', 'HARDWARE', 'SOFTWARE', 'CONFIGURATION'],
-            'engineer': ['GENERAL', 'MAINTENANCE', 'HARDWARE', 'SOFTWARE', 'CONFIGURATION', 'ADVANCED']
-        }
-        
-        allowed_categories = expertise_mapping.get(user_expertise_level, ['GENERAL'])
-        filtered_recommendations = [
-            rec for rec in base_recommendations 
-            if rec.get('category') in allowed_categories
-        ]
-        
-        # Add expertise-specific guidance
-        expertise_guidance = []
-        if user_expertise_level == 'operator':
-            expertise_guidance.append("Contact qualified technician for hardware/software issues")
-        elif user_expertise_level == 'technician_level_1':
-            expertise_guidance.append("Escalate software configuration issues to Level 2 technician")
-        
-        # Generate implementation timeline
-        immediate_actions = [rec for rec in filtered_recommendations if rec.get('priority') == 'IMMEDIATE']
-        high_priority = [rec for rec in filtered_recommendations if rec.get('priority') == 'HIGH']
-        medium_priority = [rec for rec in filtered_recommendations if rec.get('priority') == 'MEDIUM']
-        low_priority = [rec for rec in filtered_recommendations if rec.get('priority') == 'LOW']
-        
-        timeline = {
-            'immediate_actions': {
-                'timeframe': 'Next 15 minutes',
-                'actions': immediate_actions,
-                'critical': True
-            },
-            'short_term': {
-                'timeframe': 'Next 1-2 hours', 
-                'actions': high_priority,
-                'critical': diagnosis == 'FAIL'
-            },
-            'medium_term': {
-                'timeframe': 'Next 24 hours',
-                'actions': medium_priority,
-                'critical': False
-            },
-            'long_term': {
-                'timeframe': 'Next week',
-                'actions': low_priority,
-                'critical': False
-            }
-        }
-        
-        result = {
-            'summary': {
-                'total_recommendations': len(filtered_recommendations),
-                'immediate_actions_required': len(immediate_actions),
-                'user_expertise_level': user_expertise_level,
-                'diagnosis_severity': severity,
-                'system_status': diagnosis
-            },
-            'prioritized_recommendations': filtered_recommendations,
-            'implementation_timeline': timeline,
-            'expertise_guidance': expertise_guidance,
-            'safety_notes': _generate_safety_notes(diagnosis, severity),
-            'escalation_criteria': _generate_escalation_criteria(diagnosis, severity, user_expertise_level)
-        }
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in generate_recommendations: {str(e)}")
-        return {"error": f"Recommendation generation failed: {str(e)}"}
-
-
-def _generate_safety_notes(diagnosis: str, severity: str) -> List[str]:
-    """Generate safety notes based on diagnosis and severity"""
-    safety_notes = []
-    
-    if diagnosis == "FAIL":
-        safety_notes.append("⚠️ SAFETY WARNING: Do not operate instrument until all critical issues are resolved")
-        safety_notes.append("Ensure proper safety protocols are followed during repair procedures")
-    
-    if severity in ["CRITICAL", "HIGH"]:
-        safety_notes.append("Use appropriate personal protective equipment during maintenance")
-        safety_notes.append("Follow lockout/tagout procedures if working on electrical components")
-    
-    safety_notes.append("Document all maintenance actions performed")
-    safety_notes.append("Verify system functionality after completing repairs")
-    
-    return safety_notes
-
-
-def _generate_escalation_criteria(diagnosis: str, severity: str, expertise_level: str) -> Dict[str, Any]:
-    """Generate escalation criteria based on context"""
-    criteria = {
-        'escalate_immediately': [],
-        'escalate_if_no_improvement': [],
-        'escalate_for_verification': []
-    }
-    
-    if diagnosis == "FAIL" and expertise_level in ['operator', 'technician_level_1']:
-        criteria['escalate_immediately'].append("Critical system failures detected")
-    
-    if severity == "CRITICAL":
-        criteria['escalate_immediately'].append("Critical severity issues require expert attention")
-    
-    criteria['escalate_if_no_improvement'].append("No improvement after following recommendations for 2 hours")
-    criteria['escalate_for_verification'].append("System status remains uncertain after troubleshooting")
-    
-    return criteria
-
-
-# List of available diagnosis tools
+# List of diagnosis tools
 DIAGNOSIS_TOOLS = [
     generate_diagnosis,
-    calculate_confidence_score,
-    generate_recommendations
+    get_diagnosis_from_s3
 ]
