@@ -1,8 +1,6 @@
 import json
 import logging
-import os
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -35,7 +33,7 @@ st.set_page_config(
     page_title="Instrument Diagnosis Assistant",
     page_icon="static/gen-ai-dark.svg",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Remove Streamlit deployment components
@@ -76,16 +74,6 @@ def clean_session_state_unicode():
             elif isinstance(value, list):
                 results[key] = [safe_clean_text(item) if isinstance(item, str) else item for item in value]
 
-def get_all_uploaded_files():
-    """Get all uploaded files from session state as a single list"""
-    all_files = []
-    if 'uploaded_files' in st.session_state:
-        for file_list in st.session_state.uploaded_files.values():
-            if file_list:
-                all_files.extend(file_list)
-    return all_files
-
-
 def get_log_files_only():
     """Get only log files (gold_logs and failed_logs) from session state"""
     log_files = []
@@ -122,221 +110,9 @@ from s3_integration import (
     upload_files_to_s3,
     update_session_file_registry,
     get_session_context,
-    load_existing_s3_files_for_session
+    load_existing_s3_files_for_session,
+    process_uploaded_files
 )
-
-
-def process_uploaded_files(uploaded_files, max_content_length: int = 2000) -> str:
-    """
-    Process uploaded files by uploading to S3 and returning S3 URI information for the agent.
-    
-    Args:
-        uploaded_files: List of Streamlit uploaded file objects
-        max_content_length: Unused (kept for compatibility)
-    
-    Returns:
-        Formatted string with S3 file information and agent instructions
-    """
-    # Note: st is already imported at module level
-    if not uploaded_files:
-        # Check if we have files from previous uploads in this session
-        session_context = get_session_context(st.session_state)
-        if session_context:
-            return session_context
-        
-        # Try to load existing S3 files for this session
-        if 'runtime_session_id' in st.session_state:
-            load_existing_s3_files_for_session(st.session_state, st.session_state.runtime_session_id)
-            session_context = get_session_context(st.session_state)
-            if session_context:
-                return session_context
-        
-        return ""
-    
-    # Get session ID from Streamlit session state
-    if 'runtime_session_id' not in st.session_state:
-        st.session_state.runtime_session_id = str(uuid.uuid4())
-    session_id = st.session_state.runtime_session_id
-    
-    # Create progress callback for upload status
-    progress_placeholder = st.empty()
-    
-    def show_progress(current, total, filename):
-        progress_placeholder.info(f"⬆️ Uploading to S3: {filename} ({current}/{total})")
-    
-    # Upload files to S3 and get metadata
-    file_metadata = upload_files_to_s3(uploaded_files, session_id, progress_callback=show_progress)
-    
-    # Clear progress message
-    progress_placeholder.empty()
-    
-    if not file_metadata:
-        return "\n=== NO FILES SUCCESSFULLY UPLOADED TO S3 ===\n"
-    
-    # Update session registry
-    update_session_file_registry(st.session_state, file_metadata)
-    
-    # Create action summary with S3 file information
-    action_summary = []
-    action_summary.append("\n" + "="*60)
-    action_summary.append("CRITICAL INSTRUCTION: FILES ARE ALREADY UPLOADED TO S3")
-    action_summary.append("DO NOT ASK FOR FILES - USE S3 TOOLS IMMEDIATELY")
-    action_summary.append("="*60)
-    action_summary.append(f"AGENT ACTION REQUIRED: {len(file_metadata)} S3 FILES READY")
-    action_summary.append("="*60)
-    
-    # Sort files by size (largest first) and type (errors first)
-    sorted_files = sorted(file_metadata.items(), key=lambda x: (
-        'error' not in x[0].lower(),  # Error files first
-        -x[1]['file_size']  # Then by size (largest first)
-    ))
-    
-    total_size = sum(meta['file_size'] for meta in file_metadata.values())
-    action_summary.append(f"TOTAL SIZE: {total_size / (1024*1024):.2f} MB")
-    action_summary.append(f"S3 STORAGE: Files stored with session-based organization")
-    action_summary.append("")
-    
-    # Handle multiple files intelligently
-    if len(file_metadata) > 3:
-        action_summary.append("MULTIPLE FILES DETECTED - CRITICAL: Process ONE file at a time to avoid token limits")
-        action_summary.append("PRIORITY ORDER: Error logs first, then by size")
-        action_summary.append("STRATEGY: Analyze first file only, provide diagnosis, then user can request next file")
-        action_summary.append("")
-    
-    files_processed = 0
-    # CRITICAL: For multiple large files, only show the FIRST file to avoid token limits
-    max_files_to_show = 1 if len(file_metadata) > 2 and any(m['file_size'] > 500*1024 for m in file_metadata.values()) else 3
-    
-    for original_name, metadata in sorted_files:
-        file_size = metadata['file_size']
-        s3_uri = metadata['s3_uri']
-        s3_key = metadata['key']
-        
-        action_summary.append(f"\n📁 FILE {files_processed + 1}: {original_name}")
-        action_summary.append(f"   S3_URI: {s3_uri}")
-        action_summary.append(f"   SIZE: {file_size / (1024*1024):.2f} MB")
-        
-        # Provide S3-based analysis instructions - use summary for files >500KB
-        if file_size > 500 * 1024:  # Files > 500KB
-            action_summary.append(f"   ⚡ ACTION: extract_s3_log_summary(s3_uri='{s3_uri}')")
-            action_summary.append(f"   REASON: File >{file_size / (1024*1024):.1f}MB - MUST use summary for speed")
-        else:
-            action_summary.append(f"   ⚡ ACTION: get_s3_file_content(s3_uri='{s3_uri}')")
-            action_summary.append(f"   REASON: Small file - can retrieve full content")
-        
-        action_summary.append("")
-        
-        files_processed += 1
-        # CRITICAL: Limit to avoid token limits with multiple large files
-        if files_processed >= max_files_to_show:
-            remaining_files = len(file_metadata) - files_processed
-            if remaining_files > 0:
-                action_summary.append(f"[{remaining_files} additional files available - process one at a time]")
-                action_summary.append(f"IMPORTANT: Analyze the first file above, then user can request next file")
-                action_summary.append(f"Use list_session_logs(session_id='{session_id}') to see all files")
-            break
-    
-    # Add appropriate action based on file count
-    action_summary.append("\n" + "="*60)
-    action_summary.append("⚡ IMMEDIATE NEXT STEPS:")
-    action_summary.append("="*60)
-    
-    if len(file_metadata) == 1:
-        first_file = list(file_metadata.values())[0]
-        if first_file['file_size'] > 500 * 1024:  # 500KB threshold
-            action_summary.append(f"1. Call: extract_s3_log_summary(s3_uri='{first_file['s3_uri']}')")
-            action_summary.append(f"2. Call: analyze_log_content(summary_from_step_1, '')")
-            action_summary.append(f"3. Provide diagnosis results")
-            action_summary.append(f"CRITICAL: File is {first_file['file_size'] / (1024*1024):.1f}MB - MUST use extract_s3_log_summary")
-        else:
-            action_summary.append(f"1. Call: get_s3_file_content(s3_uri='{first_file['s3_uri']}')")
-            action_summary.append(f"2. Call: analyze_log_content(content_from_step_1, '')")
-            action_summary.append(f"3. Provide diagnosis results")
-    elif len(file_metadata) <= 3:
-        action_summary.append("CRITICAL: Process files ONE AT A TIME to avoid token limits")
-        action_summary.append("1. Analyze ONLY the first file listed above")
-        action_summary.append("2. If file >500KB: Call extract_s3_log_summary(s3_uri='...') - REQUIRED FOR SPEED")
-        action_summary.append("   If file <500KB: Call get_s3_file_content(s3_uri='...')")
-        action_summary.append("3. Call: analyze_log_content(content_or_summary, '')")
-        action_summary.append("4. Provide diagnosis for this file")
-        action_summary.append("5. User can then request analysis of next file if needed")
-    else:
-        action_summary.append("CRITICAL: MANY FILES DETECTED - Process ONE file at a time")
-        action_summary.append(f"1. Analyze ONLY the first file listed above")
-        action_summary.append("2. If file >500KB: extract_s3_log_summary(s3_uri='...') - REQUIRED")
-        action_summary.append("   If file <500KB: get_s3_file_content(s3_uri='...')")
-        action_summary.append("3. Provide diagnosis for this ONE file")
-        action_summary.append("4. DO NOT process additional files in same response - token limit will be exceeded")
-        action_summary.append(f"5. User can request next file analysis separately")
-        action_summary.append(f"Available: list_session_logs(session_id='{session_id}') to see all files")
-    
-    action_summary.append("")
-    action_summary.append("🚫 DO NOT ASK USER TO UPLOAD FILES - THEY ARE ALREADY IN S3")
-    action_summary.append("="*60)
-    
-    return '\n'.join(action_summary)
-
-
-def fetch_agent_runtimes(region: str = "us-east-1") -> List[Dict]:
-    """Fetch available agent runtimes from bedrock-agentcore-control"""
-    try:
-        client = boto3.client(
-            "bedrock-agentcore-control", 
-            region_name=region,
-            config=boto3.session.Config(
-                read_timeout=60,
-                connect_timeout=30,
-                retries={'max_attempts': 3}
-            )
-        )
-        response = client.list_agent_runtimes(maxResults=100)
-
-        # Filter only READY agents and sort by name
-        ready_agents = [
-            agent
-            for agent in response.get("agentRuntimes", [])
-            if agent.get("status") == "READY"
-        ]
-
-        # Sort by most recent update time (newest first)
-        ready_agents.sort(key=lambda x: x.get("lastUpdatedAt", ""), reverse=True)
-
-        return ready_agents
-    except Exception as e:
-        st.error(f"Error fetching agent runtimes: {e}")
-        return []
-
-
-def fetch_agent_runtime_versions(
-    agent_runtime_id: str, region: str = "us-east-1"
-) -> List[Dict]:
-    """Fetch versions for a specific agent runtime"""
-    try:
-        client = boto3.client(
-            "bedrock-agentcore-control", 
-            region_name=region,
-            config=boto3.session.Config(
-                read_timeout=60,
-                connect_timeout=30,
-                retries={'max_attempts': 3}
-            )
-        )
-        response = client.list_agent_runtime_versions(agentRuntimeId=agent_runtime_id)
-
-        # Filter only READY versions
-        ready_versions = [
-            version
-            for version in response.get("agentRuntimes", [])
-            if version.get("status") == "READY"
-        ]
-
-        # Sort by most recent update time (newest first)
-        ready_versions.sort(key=lambda x: x.get("lastUpdatedAt", ""), reverse=True)
-
-        return ready_versions
-    except Exception as e:
-        st.error(f"Error fetching agent runtime versions: {e}")
-        return []
 
 
 def clean_response_text(text: str, show_thinking: bool = True) -> str:
@@ -390,120 +166,6 @@ def clean_response_text(text: str, show_thinking: bool = True) -> str:
         text = re.sub(r"<thinking>.*?</thinking>", "", text)
 
     return text.strip()
-
-
-def extract_text_from_response(data) -> str:
-    """Extract text content from response data in various formats"""
-    if isinstance(data, dict):
-        # Handle format: {'role': 'assistant', 'content': [{'text': 'Hello!'}]}
-        if "role" in data and "content" in data:
-            content = data["content"]
-            if isinstance(content, list) and len(content) > 0:
-                if isinstance(content[0], dict) and "text" in content[0]:
-                    return str(content[0]["text"])
-                else:
-                    return str(content[0])
-            elif isinstance(content, str):
-                return content
-            else:
-                return str(content)
-
-        # Handle other common formats
-        if "text" in data:
-            return str(data["text"])
-        elif "content" in data:
-            content = data["content"]
-            if isinstance(content, str):
-                return content
-            else:
-                return str(content)
-        elif "message" in data:
-            return str(data["message"])
-        elif "response" in data:
-            return str(data["response"])
-        elif "result" in data:
-            return str(data["result"])
-
-    return str(data)
-
-
-def parse_streaming_chunk(chunk: str) -> str:
-    """Parse individual streaming chunk and extract meaningful content"""
-    logger.debug(f"parse_streaming_chunk: received chunk: {chunk}")
-    logger.debug(f"parse_streaming_chunk: chunk type: {type(chunk)}")
-
-    try:
-        # Try to parse as JSON first
-        if chunk.strip().startswith("{"):
-            logger.debug("parse_streaming_chunk: Attempting JSON parse")
-            data = json.loads(chunk)
-            logger.debug(f"parse_streaming_chunk: Successfully parsed JSON: {data}")
-
-            # Handle the specific format: {'role': 'assistant', 'content': [{'text': '...'}]}
-            if isinstance(data, dict) and "role" in data and "content" in data:
-                content = data["content"]
-                if isinstance(content, list) and len(content) > 0:
-                    first_item = content[0]
-                    if isinstance(first_item, dict) and "text" in first_item:
-                        extracted_text = first_item["text"]
-                        logger.debug(
-                            f"parse_streaming_chunk: Extracted text: {extracted_text}"
-                        )
-                        return extracted_text
-                    else:
-                        return str(first_item)
-                else:
-                    return str(content)
-            else:
-                # Use the general extraction function for other formats
-                return extract_text_from_response(data)
-
-        # If not JSON, return the chunk as-is
-        logger.debug("parse_streaming_chunk: Not JSON, returning as-is")
-        return chunk
-    except json.JSONDecodeError as e:
-        logger.error(f"parse_streaming_chunk: JSON decode error: {e}")
-
-        # Try to handle Python dict string representation (with single quotes)
-        if chunk.strip().startswith("{") and "'" in chunk:
-            logger.debug(
-                "parse_streaming_chunk: Attempting to handle Python dict string"
-            )
-            try:
-                # Try to convert single quotes to double quotes for JSON parsing
-                # This is a simple approach - might need refinement for complex cases
-                json_chunk = chunk.replace("'", '"')
-                data = json.loads(json_chunk)
-                logger.debug(
-                    f"parse_streaming_chunk: Successfully converted and parsed: {data}"
-                )
-
-                # Handle the specific format
-                if isinstance(data, dict) and "role" in data and "content" in data:
-                    content = data["content"]
-                    if isinstance(content, list) and len(content) > 0:
-                        first_item = content[0]
-                        if isinstance(first_item, dict) and "text" in first_item:
-                            extracted_text = first_item["text"]
-                            logger.debug(
-                                f"parse_streaming_chunk: Extracted text from converted dict: {extracted_text}"
-                            )
-                            return extracted_text
-                        else:
-                            return str(first_item)
-                    else:
-                        return str(content)
-                else:
-                    return extract_text_from_response(data)
-            except json.JSONDecodeError:
-                logger.debug(
-                    "parse_streaming_chunk: Failed to convert Python dict string"
-                )
-                pass
-
-        # If all parsing fails, return the chunk as-is
-        logger.debug("parse_streaming_chunk: All parsing failed, returning chunk as-is")
-        return chunk
 
 
 def invoke_agent_streaming(
@@ -642,6 +304,45 @@ def invoke_agent_streaming(
 
 
 
+def stream_agent_response(prompt: str, agent_arn: str, runtime_session_id: str, region: str, show_tools: bool, show_thinking: bool):
+    """
+    Helper function to stream agent response and handle display.
+    Returns the full response text.
+    """
+    message_placeholder = st.empty()
+    chunk_buffer = ""
+    auto_format = True  # Always format responses
+    show_raw = False  # Never show raw
+
+    try:
+        # Stream the response
+        for chunk in invoke_agent_streaming(prompt, agent_arn, runtime_session_id, region, show_tools):
+            # Ensure chunk is a string
+            if not isinstance(chunk, str):
+                chunk = str(chunk)
+
+            # Add chunk to buffer
+            chunk_buffer += chunk
+
+            # Update display periodically
+            if len(chunk_buffer) % 3 == 0 or chunk.endswith(" ") or chunk.endswith("\n"):
+                cleaned_response = clean_response_text(chunk_buffer, show_thinking)
+                message_placeholder.markdown(cleaned_response + " |")
+            
+            time.sleep(0.01)
+
+        # Final response without cursor
+        full_response = clean_response_text(chunk_buffer, show_thinking)
+        message_placeholder.markdown(full_response)
+
+        return full_response
+
+    except Exception as e:
+        error_msg = f"**Error:** {str(e)}"
+        message_placeholder.markdown(error_msg)
+        return error_msg
+
+
 def main():
     # Clean any Unicode characters from session state first
     clean_session_state_unicode()
@@ -747,234 +448,61 @@ def main():
     
     st.divider()
 
-    # Sidebar for settings
-    with st.sidebar:
-        st.header("Settings")
-
-        # Region selection (moved up since it affects agent fetching)
-        region = st.selectbox(
-            "AWS Region",
-            ["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"],
-            index=0,
-        )
-
-        # Agent selection
-        st.subheader("Agent Selection")
-
-        # Fetch available agents
-        with st.spinner("Loading available agents..."):
-            available_agents = fetch_agent_runtimes(region)
-
-        if available_agents:
-            # Get unique agent names and their runtime IDs
-            unique_agents = {}
-            for agent in available_agents:
-                name = agent.get("agentRuntimeName", "Unknown")
-                runtime_id = agent.get("agentRuntimeId", "")
-                if name not in unique_agents:
-                    unique_agents[name] = runtime_id
-
-            # Create agent name options
-            agent_names = list(unique_agents.keys())
-
-            # Agent name selection dropdown
-            col1, col2 = st.columns([2, 1])
-
-            with col1:
-                selected_agent_name = st.selectbox(
-                    "Agent Name",
-                    options=agent_names,
-                    help="Choose an agent to chat with",
-                )
-
-            # Get versions for the selected agent using the specific API
-            if selected_agent_name and selected_agent_name in unique_agents:
-                agent_runtime_id = unique_agents[selected_agent_name]
-
-                with st.spinner("Loading versions..."):
-                    agent_versions = fetch_agent_runtime_versions(
-                        agent_runtime_id, region
-                    )
-
-                if agent_versions:
-                    version_options = []
-                    version_arn_map = {}
-
-                    for version in agent_versions:
-                        version_num = version.get("agentRuntimeVersion", "Unknown")
-                        arn = version.get("agentRuntimeArn", "")
-                        updated = version.get("lastUpdatedAt", "")
-                        description = version.get("description", "")
-
-                        # Format version display with update time
-                        version_display = f"v{version_num}"
-                        if updated:
-                            try:
-                                if hasattr(updated, "strftime"):
-                                    updated_str = updated.strftime("%m/%d %H:%M")
-                                    version_display += f" ({updated_str})"
-                            except:
-                                pass
-
-                        version_options.append(version_display)
-                        version_arn_map[version_display] = {
-                            "arn": arn,
-                            "description": description,
-                        }
-
-                    with col2:
-                        selected_version = st.selectbox(
-                            "Version",
-                            options=version_options,
-                            help="Choose the version to use",
-                        )
-
-                    # Get the ARN for the selected agent and version
-                    version_info = version_arn_map.get(selected_version, {})
-                    agent_arn = version_info.get("arn", "")
-                    description = version_info.get("description", "")
-
-                    # Show selected agent info
-                    if agent_arn:
-                        st.info(f"Selected: {selected_agent_name} {selected_version}")
-                        if description:
-                            st.caption(f"Description: {description}")
-                        with st.expander("View ARN"):
-                            st.code(agent_arn)
-                else:
-                    st.warning(f"No versions found for {selected_agent_name}")
-                    agent_arn = ""
-            else:
-                agent_arn = ""
-        else:
-            st.error("No agent runtimes found or error loading agents")
-            agent_arn = ""
-
-            # Fallback manual input
-            st.subheader("Manual ARN Input")
-            agent_arn = st.text_input(
-                "Agent ARN", value="", help="Enter your Bedrock AgentCore ARN manually"
-            )
-        if st.button("Refresh", key="refresh_agents", help="Refresh agent list"):
-            st.rerun()
-
-        # Runtime Session ID
-        st.subheader("Session Configuration")
-
-        # Initialize session ID in session state if not exists
-        if "runtime_session_id" not in st.session_state:
-            st.session_state.runtime_session_id = str(uuid.uuid4())
-
-        # Session ID input with generate button
-        runtime_session_id = st.text_input(
-            "Runtime Session ID",
-            value=st.session_state.runtime_session_id,
-            help="Unique identifier for this runtime session",
-        )
-
-        if st.button("Refresh", help="Generate new session ID and clear chat"):
-            st.session_state.runtime_session_id = str(uuid.uuid4())
-            st.session_state.messages = []  # Clear chat messages when resetting session
-            st.rerun()
-
-        # Update session state if user manually changed the ID
-        if runtime_session_id != st.session_state.runtime_session_id:
-            st.session_state.runtime_session_id = runtime_session_id
-
-        # Diagnosis-specific options
-        st.subheader("🔧 Diagnosis Options")
+    # Configuration - all hardcoded, can be moved to config file
+    region = "us-east-1"
+    analysis_mode = "Comprehensive Analysis"
+    confidence_threshold = 0.75
+    include_visual_analysis = True
+    max_file_content = 2000
+    st.session_state.max_file_content = max_file_content
+    auto_format = True
+    show_raw = False
+    show_tools = True
+    show_thinking = False
+    
+    # Initialize session ID
+    if "runtime_session_id" not in st.session_state:
+        st.session_state.runtime_session_id = str(uuid.uuid4())
+    runtime_session_id = st.session_state.runtime_session_id
+    
+    # Auto-fetch latest agent
+    agent_arn = ""
+    agent_name = "Unknown"
+    try:
+        client = boto3.client("bedrock-agentcore-control", region_name=region)
+        response = client.list_agent_runtimes(maxResults=100)
         
-        # Fixed to Comprehensive Analysis mode
-        analysis_mode = "Comprehensive Analysis"
+        ready_agents = [
+            agent for agent in response.get("agentRuntimes", [])
+            if agent.get("status") == "READY"
+        ]
+        ready_agents.sort(key=lambda x: x.get("lastUpdatedAt", ""), reverse=True)
         
-        confidence_threshold = st.slider(
-            "Confidence Threshold",
-            min_value=0.5,
-            max_value=0.95,
-            value=0.75,
-            step=0.05,
-            help="Minimum confidence level for diagnosis decisions"
-        )
-        
-        include_visual_analysis = st.checkbox(
-            "Include Visual Analysis",
-            value=True,
-            help="Analyze images and diagrams in troubleshooting guides"
-        )
-        
-        # File processing - hardcoded to Smart Truncation (Recommended)
-        max_file_content = 2000
-        st.session_state.max_file_content = max_file_content
-        
-        # Response formatting options - hardcoded for simplicity
-        auto_format = True
-        show_raw = False
-        show_tools = True
-        show_thinking = False
-        
-        # Display Options
-        st.subheader("Display Options")
-        show_tools = st.checkbox(
-            "Show tools",
-            value=True,
-            help="Display tools used by the agent",
-        )
-        show_thinking = st.checkbox(
-            "Show thinking",
-            value=False,
-            help="Display the AI thinking process",
-        )
-
-        # Clear chat button
-        if st.button("Clear Chat"):
-            st.session_state.messages = []
-            st.rerun()
-
-        # Connection status
-        st.divider()
-        if agent_arn:
-            st.success("✅ Agent selected")
+        if ready_agents:
+            latest_agent = ready_agents[0]
+            agent_name = latest_agent.get("agentRuntimeName", "Unknown")
+            agent_id = latest_agent.get("agentRuntimeId", "")
             
-            # Check agent status
-            if st.button("Check Agent Status"):
-                with st.spinner("Checking agent status..."):
-                    try:
-                        status_result = subprocess.run(
-                            ["agentcore", "status"],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            encoding='utf-8',
-                            errors='replace',
-                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                        )
-                        
-                        if status_result.returncode == 0:
-                            status_output = status_result.stdout
-                            if "Deploying" in status_output:
-                                st.warning("Agent is still deploying. Please wait a few minutes.")
-                            elif "ExpiredTokenException" in status_output or "ExpiredToken" in status_output:
-                                st.error("AWS credentials expired. Please refresh your credentials.")
-                            elif "Unknown" in status_output and "Endpoint" in status_output:
-                                st.warning("Agent endpoint not ready. Deployment may still be in progress.")
-                            elif "READY" in status_output or "ready" in status_output.lower():
-                                st.success("✅ Agent is ready and available!")
-                            else:
-                                st.info("Agent status unclear. Check the debug info below.")
-                        else:
-                            st.error(f"Could not check agent status (exit code: {status_result.returncode})")
-                            
-                    except Exception as e:
-                        st.error(f"Error checking agent status: {str(e)}")
-        else:
-            st.error("Please select an agent")
+            versions_response = client.list_agent_runtime_versions(agentRuntimeId=agent_id)
+            ready_versions = [
+                v for v in versions_response.get("agentRuntimes", [])
+                if v.get("status") == "READY"
+            ]
+            ready_versions.sort(key=lambda x: x.get("lastUpdatedAt", ""), reverse=True)
+            
+            if ready_versions:
+                latest_version = ready_versions[0]
+                agent_arn = latest_version.get("agentRuntimeArn", "")
+                version_num = latest_version.get("agentRuntimeVersion", "Unknown")
+                agent_name = f"{agent_name} v{version_num}"
+    except Exception as e:
+        logger.error(f"Error fetching agents: {e}")
+        agent_name = "Error loading agent"
+    
+    # No sidebar - all configuration is automatic
         
-        # Debug section
-        if st.checkbox("Show Debug Info", value=False):
-            st.subheader("Debug Information")
-            st.write(f"**Agent ARN:** {agent_arn}")
-            st.write(f"**Session ID:** {runtime_session_id}")
-            st.write(f"**Region:** {region}")
+        st.divider()
+
 
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -1073,67 +601,9 @@ def main():
 
             # Generate assistant response
             with st.chat_message("assistant", avatar=AI_AVATAR):
-                message_placeholder = st.empty()
-                chunk_buffer = ""
-
-                try:
-                    # Stream the response
-                    for chunk in invoke_agent_streaming(
-                        prompt,
-                        agent_arn,
-                        st.session_state.runtime_session_id,
-                        region,
-                        show_tools,
-                    ):
-                        # Let's see what we get
-                        logger.debug(f"MAIN LOOP: chunk type: {type(chunk)}")
-                        logger.debug(f"MAIN LOOP: chunk content: {chunk}")
-
-                        # Ensure chunk is a string before concatenating
-                        if not isinstance(chunk, str):
-                            logger.debug(
-                                f"MAIN LOOP: Converting non-string chunk to string"
-                            )
-                            chunk = str(chunk)
-
-                        # Add chunk to buffer
-                        chunk_buffer += chunk
-
-                        # Only update display every few chunks or when we hit certain characters
-                        if (
-                            len(chunk_buffer) % 3 == 0
-                            or chunk.endswith(" ")
-                            or chunk.endswith("\n")
-                        ):
-                            if auto_format:
-                                # Clean the accumulated response
-                                cleaned_response = clean_response_text(
-                                    chunk_buffer, show_thinking
-                                )
-                                message_placeholder.markdown(cleaned_response + " |")
-                            else:
-                                # Show raw response
-                                message_placeholder.markdown(chunk_buffer + " |")
-                        # nosemgrep sleep to wait for resources
-                        time.sleep(0.01)  # Reduced delay since we're batching updates
-
-                    # Final response without cursor
-                    if auto_format:
-                        full_response = clean_response_text(chunk_buffer, show_thinking)
-                    else:
-                        full_response = chunk_buffer
-
-                    message_placeholder.markdown(full_response)
-
-                    # Show raw response in expander if requested
-                    if show_raw and auto_format:
-                        with st.expander("View raw response"):
-                            st.text(chunk_buffer)
-
-                except Exception as e:
-                    error_msg = f"**Error:** {str(e)}"
-                    message_placeholder.markdown(error_msg)
-                    full_response = error_msg
+                full_response = stream_agent_response(
+                    prompt, agent_arn, st.session_state.runtime_session_id, region, show_tools, show_thinking
+                )
 
             # Add assistant response to chat history
             st.session_state.messages.append(
@@ -1149,7 +619,7 @@ def main():
         else:
             # ONLY process LOG files for analysis (not documentation)
             log_files = get_log_files_only()
-            log_contents = process_uploaded_files(log_files, st.session_state.get('max_file_content', 2000))
+            log_contents = process_uploaded_files(log_files, st.session_state, st.session_state.get('max_file_content', 2000))
             
             # Get documentation summary (just file names, not content)
             doc_summary = get_documentation_summary()
@@ -1187,7 +657,7 @@ def main():
 
         # Include ONLY log files for analysis (not documentation)
         log_files = get_log_files_only()
-        log_contents = process_uploaded_files(log_files, st.session_state.get('max_file_content', 2000))
+        log_contents = process_uploaded_files(log_files, st.session_state, st.session_state.get('max_file_content', 2000))
         
         # Get documentation summary (just file names, not content)
         doc_summary = get_documentation_summary()
@@ -1206,67 +676,9 @@ def main():
 
         # Generate assistant response
         with st.chat_message("assistant", avatar=AI_AVATAR):
-            message_placeholder = st.empty()
-            chunk_buffer = ""
-
-            try:
-                # Stream the response
-                for chunk in invoke_agent_streaming(
-                    prompt,
-                    agent_arn,
-                    st.session_state.runtime_session_id,
-                    region,
-                    show_tools,
-                ):
-                    # Let's see what we get
-                    logger.debug(f"MAIN LOOP: chunk type: {type(chunk)}")
-                    logger.debug(f"MAIN LOOP: chunk content: {chunk}")
-
-                    # Ensure chunk is a string before concatenating
-                    if not isinstance(chunk, str):
-                        logger.debug(
-                            f"MAIN LOOP: Converting non-string chunk to string"
-                        )
-                        chunk = str(chunk)
-
-                    # Add chunk to buffer
-                    chunk_buffer += chunk
-
-                    # Only update display every few chunks or when we hit certain characters
-                    if (
-                        len(chunk_buffer) % 3 == 0
-                        or chunk.endswith(" ")
-                        or chunk.endswith("\n")
-                    ):
-                        if auto_format:
-                            # Clean the accumulated response
-                            cleaned_response = clean_response_text(
-                                chunk_buffer, show_thinking
-                            )
-                            message_placeholder.markdown(cleaned_response + " |")
-                        else:
-                            # Show raw response
-                            message_placeholder.markdown(chunk_buffer + " |")
-                    # nosemgrep sleep to wait for resources
-                    time.sleep(0.01)  # Reduced delay since we're batching updates
-
-                # Final response without cursor
-                if auto_format:
-                    full_response = clean_response_text(chunk_buffer, show_thinking)
-                else:
-                    full_response = chunk_buffer
-
-                message_placeholder.markdown(full_response)
-
-                # Show raw response in expander if requested
-                if show_raw and auto_format:
-                    with st.expander("View raw response"):
-                        st.text(chunk_buffer)
-
-            except Exception as e:
-                error_msg = f"**Error:** {str(e)}"
-                message_placeholder.markdown(error_msg)
-                full_response = error_msg
+            full_response = stream_agent_response(
+                prompt, agent_arn, st.session_state.runtime_session_id, region, show_tools, show_thinking
+            )
 
         # Add assistant response to chat history
         st.session_state.messages.append(
