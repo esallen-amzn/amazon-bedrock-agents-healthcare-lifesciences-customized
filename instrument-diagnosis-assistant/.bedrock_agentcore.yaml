@@ -1,0 +1,41 @@
+default_agent: InstrumentDiagnosisAgent
+agents:
+  InstrumentDiagnosisAgent:
+    name: InstrumentDiagnosisAgent
+    entrypoint: C:/Users/esallen/MyStuff/code/github/amazon-bedrock-agents-healthcare-lifesciences/instrument-diagnosis-assistant/main.py
+    platform: linux/arm64
+    container_runtime: none
+    source_path: C:\Users\esallen\MyStuff\code\github\amazon-bedrock-agents-healthcare-lifesciences\instrument-diagnosis-assistant
+    aws:
+      execution_role: arn:aws:iam::390402579286:role/InstrumentDiagnosisInfra-RuntimeAgentCoreRole-YzRHRBgwt0Ld
+      execution_role_auto_create: true
+      account: '390402579286'
+      region: us-east-1
+      ecr_repository: 390402579286.dkr.ecr.us-east-1.amazonaws.com/bedrock-agentcore-instrumentdiagnosisagent
+      ecr_auto_create: false
+      network_configuration:
+        network_mode: PUBLIC
+        network_mode_config: null
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+    bedrock_agentcore:
+      agent_id: InstrumentDiagnosisAgent-q6zAEqCEFd
+      agent_arn: arn:aws:bedrock-agentcore:us-east-1:390402579286:runtime/InstrumentDiagnosisAgent-q6zAEqCEFd
+      agent_session_id: null
+    codebuild:
+      project_name: bedrock-agentcore-instrumentdiagnosisagent-builder
+      execution_role: arn:aws:iam::390402579286:role/AmazonBedrockAgentCoreSDKCodeBuild-us-east-1-04d7a004cd
+      source_bucket: bedrock-agentcore-codebuild-sources-390402579286-us-east-1
+    memory:
+      mode: STM_ONLY
+      memory_id: InstrumentDiagnosisAgent_mem-Iz5DIf8ys6
+      memory_arn: arn:aws:bedrock-agentcore:us-east-1:390402579286:memory/InstrumentDiagnosisAgent_mem-Iz5DIf8ys6
+      memory_name: InstrumentDiagnosisAgent_mem
+      event_expiry_days: 30
+      first_invoke_memory_check_done: true
+      was_created_by_toolkit: true
+    authorizer_configuration: null
+    request_header_configuration: null
+    oauth_configuration: null

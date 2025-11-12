@@ -1,0 +1,21 @@
+models:
+  text_model: "us.amazon.nova-pro-v1:0"
+  multimodal_model: "us.amazon.nova-canvas-v1:0"
+
+knowledge_base:
+  kb_id: "KB123456789"
+  retrieval_config:
+    max_results: 10
+    score_threshold: 0.5  # Lower threshold for better retrieval
+  always_query_first: true  # Query KB before requesting new data
+
+agent_behavior:
+  context_awareness: true
+  remember_provided_data: true
+  avoid_duplicate_requests: true
+  
+log_analysis:
+  accept_content_directly: true  # Accept log content in conversation
+  chunk_size_mb: 50
+  failure_threshold: 0.8
+  confidence_threshold: 0.75
