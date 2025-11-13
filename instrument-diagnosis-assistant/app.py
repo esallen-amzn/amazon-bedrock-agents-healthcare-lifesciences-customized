@@ -95,13 +95,13 @@ def get_documentation_summary():
     if not doc_files:
         return ""
     
-    summary = ["\n=== SUPPLEMENTAL DOCUMENTATION AVAILABLE ==="]
+    summary = ["\n--- SUPPLEMENTAL DOCUMENTATION AVAILABLE ---"]
     summary.append(f"The user has uploaded {len(doc_files)} documentation file(s) as supplemental reference:")
     for doc_file in doc_files:
         summary.append(f"  - {doc_file.name} ({doc_file.size / 1024:.1f} KB)")
     summary.append("These are reference documents (NOT logs to analyze).")
     summary.append("Use your Knowledge Base as primary reference, and these as supplemental context if needed.")
-    summary.append("=" * 50)
+    summary.append("-" * 50)
     return "\n".join(summary)
 
 

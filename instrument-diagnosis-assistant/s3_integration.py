@@ -142,9 +142,9 @@ def get_session_context(session_state: Any) -> str:
         return ""
     
     context_parts = []
-    context_parts.append("\n" + "="*60)
+    context_parts.append("\n[" + "="*58 + "]")
     context_parts.append("S3 FILES AVAILABLE FOR ANALYSIS")
-    context_parts.append("="*60)
+    context_parts.append("[" + "="*58 + "]")
     
     for filename, info in uploaded_files.items():
         context_parts.append(f"\nFile: {filename}")
@@ -157,9 +157,9 @@ def get_session_context(session_state: Any) -> str:
         else:
             context_parts.append(f"ACTION: get_s3_file_content(s3_uri='{info['s3_uri']}')")
     
-    context_parts.append("\n" + "="*60)
+    context_parts.append("\n[" + "="*58 + "]")
     context_parts.append("IMPORTANT: Use the S3 tools above to access files")
-    context_parts.append("="*60 + "\n")
+    context_parts.append("[" + "="*58 + "]\n")
     
     return '\n'.join(context_parts)
 
@@ -271,19 +271,19 @@ def process_uploaded_files(uploaded_files, session_state, max_content_length: in
     progress_placeholder.empty()
     
     if not file_metadata:
-        return "\n=== NO FILES SUCCESSFULLY UPLOADED TO S3 ===\n"
+        return "\n--- NO FILES SUCCESSFULLY UPLOADED TO S3 ---\n"
     
     # Update session registry
     update_session_file_registry(session_state, file_metadata)
     
     # Create action summary with S3 file information
     action_summary = []
-    action_summary.append("\n" + "="*60)
+    action_summary.append("\n[" + "="*58 + "]")
     action_summary.append("CRITICAL INSTRUCTION: FILES ARE ALREADY UPLOADED TO S3")
     action_summary.append("DO NOT ASK FOR FILES - USE S3 TOOLS IMMEDIATELY")
-    action_summary.append("="*60)
+    action_summary.append("[" + "="*58 + "]")
     action_summary.append(f"AGENT ACTION REQUIRED: {len(file_metadata)} S3 FILES READY")
-    action_summary.append("="*60)
+    action_summary.append("[" + "="*58 + "]")
     
     # Sort files chronologically by upload timestamp (oldest first for timeline analysis)
     sorted_files = sorted(file_metadata.items(), key=lambda x: x[1].get('upload_timestamp', ''))
@@ -334,9 +334,9 @@ def process_uploaded_files(uploaded_files, session_state, max_content_length: in
             break
     
     # Add appropriate action based on file count
-    action_summary.append("\n" + "="*60)
+    action_summary.append("\n[" + "="*58 + "]")
     action_summary.append("⚡ ANALYSIS STRATEGY:")
-    action_summary.append("="*60)
+    action_summary.append("[" + "="*58 + "]")
     
     if len(file_metadata) == 1:
         first_file = list(file_metadata.values())[0]
@@ -367,6 +367,6 @@ def process_uploaded_files(uploaded_files, session_state, max_content_length: in
     
     action_summary.append("")
     action_summary.append("🚫 DO NOT ASK USER TO UPLOAD FILES - THEY ARE ALREADY IN S3")
-    action_summary.append("="*60)
+    action_summary.append("[" + "="*58 + "]")
     
     return '\n'.join(action_summary)
