@@ -468,6 +468,8 @@ def main():
     # Auto-fetch latest agent
     agent_arn = ""
     agent_name = "Unknown"
+    credential_error = None
+    
     try:
         client = boto3.client("bedrock-agentcore-control", region_name=region)
         response = client.list_agent_runtimes(maxResults=100)
@@ -496,13 +498,38 @@ def main():
                 version_num = latest_version.get("agentRuntimeVersion", "Unknown")
                 agent_name = f"{agent_name} v{version_num}"
     except Exception as e:
-        logger.error(f"Error fetching agents: {e}")
-        agent_name = "Error loading agent"
+        error_str = str(e).lower()
+        error_type = type(e).__name__
+        
+        # Check for credential-related errors
+        if "credentials" in error_str or "expired" in error_str or "token" in error_str:
+            credential_error = "expired_credentials"
+            agent_name = "⚠️ AWS Credentials Issue"
+            logger.warning(f"AWS credential error: {e}")
+        elif "unauthorized" in error_str or "access denied" in error_str or "forbidden" in error_str:
+            credential_error = "access_denied"
+            agent_name = "⚠️ AWS Access Denied"
+            logger.warning(f"AWS access error: {e}")
+        elif "no credentials" in error_str or "unable to locate credentials" in error_str:
+            credential_error = "no_credentials"
+            agent_name = "⚠️ AWS Not Configured"
+            logger.warning(f"AWS credentials not found: {e}")
+        else:
+            logger.error(f"Error fetching agents: {e}")
+            agent_name = "Error loading agent"
     
     # No sidebar - all configuration is automatic
         
         st.divider()
 
+    # Display credential status banner if there's an issue
+    if credential_error:
+        if credential_error == "expired_credentials":
+            st.warning("⚠️ **AWS Credentials Expired** - Please refresh your credentials using `aws sso login` or your credential provider script.")
+        elif credential_error == "no_credentials":
+            st.warning("⚠️ **AWS Not Configured** - Please run `aws configure` to set up your AWS credentials.")
+        elif credential_error == "access_denied":
+            st.warning("⚠️ **AWS Access Denied** - Your credentials don't have permission to access AgentCore. Check IAM permissions.")
 
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -589,7 +616,14 @@ def main():
     # Handle pending prompt from button clicks
     if hasattr(st.session_state, 'pending_prompt') and st.session_state.pending_prompt:
         if not agent_arn:
-            st.error("Please select an agent in the sidebar first.")
+            if credential_error == "expired_credentials":
+                st.error("⚠️ **AWS Credentials Expired**\n\nYour AWS credentials have expired. Please refresh them:\n\n```bash\n# For AWS SSO users:\naws sso login --profile your-profile\n\n# For temporary credentials:\n# Re-run your credential provider script\n```")
+            elif credential_error == "no_credentials":
+                st.error("⚠️ **AWS Not Configured**\n\nAWS credentials not found. Please configure AWS CLI:\n\n```bash\naws configure\n# or for SSO:\naws configure sso\n```")
+            elif credential_error == "access_denied":
+                st.error("⚠️ **AWS Access Denied**\n\nYour AWS credentials don't have permission to access AgentCore. Please check your IAM permissions.")
+            else:
+                st.error("⚠️ **Agent Not Available**\n\nNo agent could be loaded. Please check your AWS configuration and ensure an agent is deployed.")
             st.session_state.pending_prompt = None
         else:
             prompt = st.session_state.pending_prompt
@@ -613,7 +647,14 @@ def main():
     # Quick action buttons
     if st.button("🎯 Run Full Diagnosis"):
         if not agent_arn:
-            st.error("Please select an agent in the sidebar first.")
+            if credential_error == "expired_credentials":
+                st.error("⚠️ **AWS Credentials Expired**\n\nYour AWS credentials have expired. Please refresh them:\n\n```bash\n# For AWS SSO users:\naws sso login --profile your-profile\n\n# For temporary credentials:\n# Re-run your credential provider script\n```")
+            elif credential_error == "no_credentials":
+                st.error("⚠️ **AWS Not Configured**\n\nAWS credentials not found. Please configure AWS CLI:\n\n```bash\naws configure\n# or for SSO:\naws configure sso\n```")
+            elif credential_error == "access_denied":
+                st.error("⚠️ **AWS Access Denied**\n\nYour AWS credentials don't have permission to access AgentCore. Please check your IAM permissions.")
+            else:
+                st.error("⚠️ **Agent Not Available**\n\nNo agent could be loaded. Please check your AWS configuration and ensure an agent is deployed.")
         elif not st.session_state.uploaded_files.get('failed_logs'):
             st.error("Please upload problem unit logs first for diagnosis. Gold standard logs are optional.")
         else:
@@ -652,7 +693,14 @@ def main():
     # Chat input
     if prompt := st.chat_input("Ask about instrument diagnosis, upload files, or request specific analysis..."):
         if not agent_arn:
-            st.error("Please select an agent in the sidebar first.")
+            if credential_error == "expired_credentials":
+                st.error("⚠️ **AWS Credentials Expired**\n\nYour AWS credentials have expired. Please refresh them:\n\n```bash\n# For AWS SSO users:\naws sso login --profile your-profile\n\n# For temporary credentials:\n# Re-run your credential provider script\n```")
+            elif credential_error == "no_credentials":
+                st.error("⚠️ **AWS Not Configured**\n\nAWS credentials not found. Please configure AWS CLI:\n\n```bash\naws configure\n# or for SSO:\naws configure sso\n```")
+            elif credential_error == "access_denied":
+                st.error("⚠️ **AWS Access Denied**\n\nYour AWS credentials don't have permission to access AgentCore. Please check your IAM permissions.")
+            else:
+                st.error("⚠️ **Agent Not Available**\n\nNo agent could be loaded. Please check your AWS configuration and ensure an agent is deployed.")
             return
 
         # Include ONLY log files for analysis (not documentation)
